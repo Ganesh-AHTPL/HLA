@@ -284,7 +284,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
   const primaryAlertEmail =
     schedules.find((s) => s.notification_emails)?.notification_emails?.split(',')[0]?.trim() ||
     currentUser?.email ||
-    'ganeshcllg@gmail.com'
+    ''
 
   const getScheduleTypeLabel = (sched) => {
     if (sched.schedule_type === 'daily') return `Daily at ${sched.run_time} (${sched.timezone})`
@@ -956,7 +956,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                     className="form-control"
                   />
                   <small style={{ color: '#64748b', fontSize: '0.85rem', marginTop: '0.3rem', display: 'block' }}>
-                    Note: Schedule creator and workspace administrators are also automatically notified.
+                    Alerts are sent only to the recipient email addresses specified above.
                   </small>
                 </div>
               </div>

@@ -179,11 +179,10 @@ def parse_and_validate_emails(raw_email_str: str) -> list[str]:
 
 def collect_failure_recipients(schedule=None, project=None, doc=None, additional_emails: str = None) -> list[str]:
     """
-    Collects all respective recipients for a failure alert:
-    1. Emails explicitly specified in the schedule's `notification_emails` field.
-    2. Creator of the schedule (if has a valid email).
-    3. Creator / owner of the project (if has a valid email).
-    4. System administrators (so platform owners are aware).
+    Collects only the respective recipient emails for a failure alert:
+    1. Emails explicitly specified in additional_emails or schedule's `notification_emails` field.
+    2. If none explicitly specified, falls back to schedule creator or project owner (if valid email).
+    Does NOT blast all administrators or include unconfigured recipients.
     """
     recipients = []
 
@@ -194,29 +193,18 @@ def collect_failure_recipients(schedule=None, project=None, doc=None, additional
     if schedule and getattr(schedule, "notification_emails", None):
         recipients.extend(parse_and_validate_emails(schedule.notification_emails))
 
-    # 2. Schedule creator email
+    # If explicit recipient emails are configured, return ONLY those
+    if recipients:
+        return recipients
+
+    # Fallback ONLY if no recipient email was configured:
     if schedule and getattr(schedule, "creator", None) and getattr(schedule.creator, "email", None):
         if EMAIL_REGEX.match(schedule.creator.email) and schedule.creator.email not in recipients:
             recipients.append(schedule.creator.email)
 
-    # 3. Project owner email
-    if project and getattr(project, "creator", None) and getattr(project.creator, "email", None):
+    if not recipients and project and getattr(project, "creator", None) and getattr(project.creator, "email", None):
         if EMAIL_REGEX.match(project.creator.email) and project.creator.email not in recipients:
             recipients.append(project.creator.email)
-
-    # 4. System Admin emails
-    try:
-        admins = User.query.filter_by(role="admin").all()
-        for a in admins:
-            if a.email and EMAIL_REGEX.match(a.email) and a.email not in recipients:
-                recipients.append(a.email)
-    except Exception as e:
-        logger.debug(f"Could not query admin emails: {e}")
-
-    # Fallback to default if no emails discovered
-    if not recipients:
-        fallback = os.getenv("DEFAULT_ALERT_EMAIL", "ops-team@enterprise.local")
-        recipients.append(fallback)
 
     return recipients
 

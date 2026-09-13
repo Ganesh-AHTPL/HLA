@@ -6,7 +6,7 @@ export default function SMTPSettingsModal({ onClose, currentUser, defaultEmail }
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
-  const fallbackEmail = defaultEmail || currentUser?.email || 'ganesh.raman@analytixhub.ai'
+  const fallbackEmail = defaultEmail || currentUser?.email || ''
   const [testEmail, setTestEmail] = useState(fallbackEmail)
   const [testResult, setTestResult] = useState(null)
   const [statusMessage, setStatusMessage] = useState(null)
@@ -213,7 +213,7 @@ export default function SMTPSettingsModal({ onClose, currentUser, defaultEmail }
                   type="email"
                   value={testEmail}
                   onChange={(e) => setTestEmail(e.target.value)}
-                  placeholder="Enter email e.g. ganesh.raman@analytixhub.ai"
+                  placeholder="Enter email e.g. alerts@company.com"
                   className="form-control email-big-input"
                 />
                 <button

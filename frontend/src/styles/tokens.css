@@ -1,0 +1,96 @@
+/* ═════════════════════════════════════════════════════════════════════
+   HLA ARCHITECTURE STUDIO — CORE DESIGN TOKENS
+   ═════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Surfaces */
+  --bg-app: #0a0e17;
+  --bg-subtle: #0f1523;
+  --bg-surface: #131b2e;
+  --bg-surface-elevated: #1a243b;
+  --bg-surface-card: rgba(19, 27, 46, 0.85);
+  --bg-surface-hover: #22304d;
+  --bg-glass-strong: rgba(15, 21, 35, 0.92);
+  --bg-glass-subtle: rgba(255, 255, 255, 0.04);
+
+  /* Primary Brand & Accents */
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-active: #1e40af;
+  --primary-subtle: rgba(37, 99, 235, 0.12);
+  --primary-border: rgba(37, 99, 235, 0.35);
+
+  /* Semantic Feedback */
+  --success: #10b981;
+  --success-subtle: rgba(16, 185, 129, 0.12);
+  --warning: #f59e0b;
+  --warning-subtle: rgba(245, 158, 11, 0.12);
+  --danger: #ef4444;
+  --danger-subtle: rgba(239, 68, 68, 0.12);
+  --info: #0284c7;
+
+  /* Typography Colors */
+  --text-primary: #f8fafc;
+  --text-secondary: #cbd5e1;
+  --text-muted: #94a3b8;
+  --text-dim: #64748b;
+
+  /* Borders & Glass Dividers */
+  --border-subtle: rgba(255, 255, 255, 0.09);
+  --border-glass: rgba(255, 255, 255, 0.12);
+  --border-hover: rgba(255, 255, 255, 0.2);
+  --border-focus: #3b82f6;
+
+  /* Elevation Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 4px 16px -2px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-deep: 0 12px 30px -4px rgba(0, 0, 0, 0.45);
+  --shadow-modal: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+
+  /* Layout Scales */
+  --sidebar-width: 260px;
+  --sidebar-collapsed-width: 76px;
+  --topbar-height: 60px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+
+  /* Compatibility & Neon Glow Aliases */
+  --neon-cyan: var(--primary);
+  --neon-teal: #059669;
+  --neon-purple: #6366f1;
+  --neon-rose: var(--danger);
+  --neon-amber: var(--warning);
+  --border-cyan: var(--primary-border);
+  --border-teal: rgba(5, 150, 105, 0.3);
+  --grad-cyan-teal: linear-gradient(135deg, #2563eb 0%, #3b82f6 100%);
+  --grad-purple-cyan: linear-gradient(135deg, #4f46e5 0%, #2563eb 100%);
+}
+
+[data-theme="light"] {
+  --bg-app: #f8fafc;
+  --bg-subtle: #f1f5f9;
+  --bg-surface: #ffffff;
+  --bg-surface-elevated: #f8fafc;
+  --bg-surface-card: #ffffff;
+  --bg-surface-hover: #e2e8f0;
+  --bg-glass-strong: rgba(255, 255, 255, 0.95);
+  --bg-glass-subtle: rgba(0, 0, 0, 0.02);
+
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+  --primary-active: #1e40af;
+  --primary-subtle: rgba(37, 99, 235, 0.08);
+  --primary-border: rgba(37, 99, 235, 0.25);
+
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-glass: rgba(0, 0, 0, 0.1);
+  --border-hover: rgba(0, 0, 0, 0.18);
+  --border-focus: #2563eb;
+}

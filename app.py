@@ -43,6 +43,32 @@ CORS(app, origins=[
     "http://192.168.0.196:3000"
 ], supports_credentials=True)
 
+import logging
+logger = logging.getLogger("hla_app")
+logger.setLevel(logging.INFO)
+if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '').endswith('app.log') for h in logger.handlers):
+    try:
+        fh = logging.FileHandler("app.log", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
+        logger.addHandler(fh)
+    except Exception:
+        pass
+
+def safe_log(msg: str, level: str = "info"):
+    try:
+        if level == "error":
+            logger.error(msg)
+        else:
+            logger.info(msg)
+    except Exception:
+        pass
+    try:
+        print(msg)
+    except Exception:
+        pass
+
+
 # ── Config ────────────────────────────────────────────────────────────
 UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -203,7 +229,7 @@ def forgot_password():
     data = request.get_json() or {}
     email = (data.get("email") or data.get("identifier") or "").strip().lower()
 
-    print("[RESET] Password reset request received", flush=True)
+    safe_log("[RESET] Password reset request received")
 
     if not email or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
         return jsonify({"error": "Please enter a valid email address."}), 400
@@ -236,7 +262,7 @@ def forgot_password():
 
     # 2. Lookup user by registered email (case-insensitive)
     user = User.query.filter(User.email.ilike(email)).first()
-    print(f"[RESET] User lookup completed (user_found={bool(user)})", flush=True)
+    safe_log(f"[RESET] User lookup completed (user_found={bool(user)})")
 
     # 3. If account exists, generate and store secure hashed OTP and dispatch email
     if user:
@@ -248,7 +274,7 @@ def forgot_password():
 
             # Cryptographically secure 6-digit numeric OTP (10 min validity, max 5 attempts)
             otp_code = f"{secrets.randbelow(1000000):06d}"
-            print("[RESET] OTP generated", flush=True)
+            safe_log("[RESET] OTP generated")
             expires_at = now_utc + timedelta(minutes=10)
 
             reset_record = PasswordResetToken(
@@ -264,7 +290,7 @@ def forgot_password():
             reset_record.set_otp(otp_code)
             db.session.add(reset_record)
             db.session.commit()
-            print("[RESET] OTP stored successfully", flush=True)
+            safe_log("[RESET] OTP stored successfully")
 
             # Send OTP ONLY to the user's registered email
             dispatch_res = email_service.send_password_reset_otp_email(user, otp_code, expires_minutes=10)
@@ -275,10 +301,10 @@ def forgot_password():
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
-                print(f"[RESET] Email dispatch failed: {dispatch_res.get('error')}", flush=True)
+                safe_log(f"[RESET] Email dispatch failed: {dispatch_res.get('error')}", level="error")
                 return jsonify({"error": "Unable to send the verification email. Please try again later."}), 500
 
-            print("[RESET] Password reset OTP email dispatched successfully", flush=True)
+            safe_log("[RESET] Password reset OTP email dispatched successfully")
         except Exception as e:
             import traceback
             traceback.print_exc()

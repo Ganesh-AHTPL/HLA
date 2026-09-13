@@ -21,6 +21,8 @@ venv/
 ENV/
 *.sqlite3
 uploads/
+*.log
+app.log
 
 # Node
 node_modules/

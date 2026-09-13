@@ -21,6 +21,14 @@ from models import db, User, EmailNotificationLog, SystemSetting
 
 logger = logging.getLogger("email_service")
 logger.setLevel(logging.INFO)
+if not any(isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', '').endswith('app.log') for h in logger.handlers):
+    try:
+        fh = logging.FileHandler("app.log", encoding="utf-8")
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
+        logger.addHandler(fh)
+    except Exception:
+        pass
 
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -956,6 +964,7 @@ HLA Studio"""
 
     # Safe Server Diagnostic Logs
     print("[EMAIL] Preparing password reset email", flush=True)
+    logger.info("[EMAIL] Preparing password reset email")
     cfg = get_smtp_config()
     host = cfg.get("host")
     port = cfg.get("port")
@@ -968,10 +977,15 @@ HLA Studio"""
     print(f"[EMAIL] SMTP port configured: {bool(port)}", flush=True)
     print(f"[EMAIL] SMTP username configured: {bool(user_auth and user_auth.strip())}", flush=True)
     print(f"[EMAIL] SMTP password configured: {bool(pwd and pwd.strip())}", flush=True)
+    logger.info(f"[EMAIL] SMTP host configured: {bool(host and host.strip())}")
+    logger.info(f"[EMAIL] SMTP port configured: {bool(port)}")
+    logger.info(f"[EMAIL] SMTP username configured: {bool(user_auth and user_auth.strip())}")
+    logger.info(f"[EMAIL] SMTP password configured: {bool(pwd and pwd.strip())}")
 
     if not is_smtp_configured(cfg):
         err_msg = "SMTP server is not configured. Real email delivery required."
         print(f"[EMAIL] Error: {err_msg}", flush=True)
+        logger.error(f"[EMAIL] Error: {err_msg}")
         # Audit log in database
         try:
             masked_body_text = body_text.replace(otp_code, "******")
@@ -1012,22 +1026,29 @@ HLA Studio"""
 
     try:
         print("[EMAIL] Connecting to SMTP server", flush=True)
+        logger.info("[EMAIL] Connecting to SMTP server")
         if security == "ssl" or port == 465:
             with smtplib.SMTP_SSL(host, port, timeout=15) as server:
                 print("[EMAIL] SMTP connection established", flush=True)
+                logger.info("[EMAIL] SMTP connection established")
                 if user_auth and pwd:
                     server.login(user_auth, pwd)
                     print("[EMAIL] SMTP authentication successful", flush=True)
+                    logger.info("[EMAIL] SMTP authentication successful")
                 print("[EMAIL] Sending password reset email", flush=True)
+                logger.info("[EMAIL] Sending password reset email")
                 senderrs = server.sendmail(from_addr, [target_email], msg.as_string())
                 if senderrs:
                     raise Exception(f"Recipient rejected by SMTP server: {senderrs}")
                 smtp_accepted = True
                 print("[EMAIL] Email accepted by SMTP server", flush=True)
                 print("[EMAIL] Password reset email sent successfully", flush=True)
+                logger.info("[EMAIL] Email accepted by SMTP server")
+                logger.info("[EMAIL] Password reset email sent successfully")
         else:
             with smtplib.SMTP(host, port, timeout=15) as server:
                 print("[EMAIL] SMTP connection established", flush=True)
+                logger.info("[EMAIL] SMTP connection established")
                 server.ehlo()
                 if security != "none":
                     server.starttls()
@@ -1035,31 +1056,39 @@ HLA Studio"""
                 if user_auth and pwd:
                     server.login(user_auth, pwd)
                     print("[EMAIL] SMTP authentication successful", flush=True)
+                    logger.info("[EMAIL] SMTP authentication successful")
                 print("[EMAIL] Sending password reset email", flush=True)
+                logger.info("[EMAIL] Sending password reset email")
                 senderrs = server.sendmail(from_addr, [target_email], msg.as_string())
                 if senderrs:
                     raise Exception(f"Recipient rejected by SMTP server: {senderrs}")
                 smtp_accepted = True
                 print("[EMAIL] Email accepted by SMTP server", flush=True)
                 print("[EMAIL] Password reset email sent successfully", flush=True)
+                logger.info("[EMAIL] Email accepted by SMTP server")
+                logger.info("[EMAIL] Password reset email sent successfully")
 
         dispatch_status = "SENT"
     except smtplib.SMTPAuthenticationError as auth_err:
         dispatch_status = "FAILED"
         err_msg = f"535 Authentication failed: {auth_err}"
         print(f"[EMAIL] SMTP Authentication failed: {auth_err}", flush=True)
+        logger.error(f"[EMAIL] SMTP Authentication failed: {auth_err}")
     except smtplib.SMTPConnectError as conn_err:
         dispatch_status = "FAILED"
         err_msg = f"SMTP Connection error: {conn_err}"
         print(f"[EMAIL] SMTP Connection error: {conn_err}", flush=True)
+        logger.error(f"[EMAIL] SMTP Connection error: {conn_err}")
     except smtplib.SMTPServerDisconnected as disconn_err:
         dispatch_status = "FAILED"
         err_msg = f"SMTP Server disconnected: {disconn_err}"
         print(f"[EMAIL] SMTP Server disconnected: {disconn_err}", flush=True)
+        logger.error(f"[EMAIL] SMTP Server disconnected: {disconn_err}")
     except Exception as e:
         dispatch_status = "FAILED"
         err_msg = f"SMTP Transmission error: {e}"
         print(f"[EMAIL] SMTP Transmission error: {e}", flush=True)
+        logger.error(f"[EMAIL] SMTP Transmission error: {e}")
 
     # Mask plaintext OTP before storing in database logs
     masked_body_text = body_text.replace(otp_code, "******")

@@ -738,7 +738,12 @@ directly to {target_email}.
                 if security != "none":
                     server.starttls()
                     server.ehlo()
-                if user and pwd:
+                if user:
+                    if not pwd or not str(pwd).strip():
+                        raise smtplib.SMTPAuthenticationError(
+                            530,
+                            b"Authentication Required: SMTP_PASSWORD is not set in .env. Gmail requires a 16-character App Password (from https://myaccount.google.com/apppasswords)."
+                        )
                     server.login(user, pwd)
                     print("[EMAIL] SMTP authentication successful", flush=True)
                 print("[EMAIL] Sending test email...", flush=True)
@@ -1053,7 +1058,12 @@ HLA Studio"""
                 if security != "none":
                     server.starttls()
                     server.ehlo()
-                if user_auth and pwd:
+                if user_auth:
+                    if not pwd or not str(pwd).strip():
+                        raise smtplib.SMTPAuthenticationError(
+                            530,
+                            b"Authentication Required: SMTP_PASSWORD is not set in .env. Gmail requires a 16-character App Password (from https://myaccount.google.com/apppasswords)."
+                        )
                     server.login(user_auth, pwd)
                     safe_log("[EMAIL] SMTP authentication successful")
                 safe_log("[EMAIL] Sending password reset email")

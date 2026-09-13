@@ -164,7 +164,9 @@ def login():
     if not username or not password:
         return jsonify({"error": "Username and password are required."}), 400
 
-    user = User.query.filter_by(username=username).first()
+    user = User.query.filter(
+        db.or_(User.username == username, User.email.ilike(username))
+    ).first()
     if not user or not user.check_password(password):
         return jsonify({"error": "Invalid username or password."}), 401
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import React, { useState } from 'react'
 import './TableSchemaModal.css'
 
 export default function TableSchemaModal({ tableData, onClose }) {

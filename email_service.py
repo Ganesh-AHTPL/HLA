@@ -51,6 +51,11 @@ def get_smtp_config() -> dict:
     Dynamically loads SMTP configuration from the database (SystemSetting table),
     falling back to environment variables.
     """
+    try:
+        load_dotenv(override=True)
+    except Exception:
+        pass
+
     # Check both standard and alternate environment variable names
     env_host = os.getenv("SMTP_HOST", "").strip()
     env_port = os.getenv("SMTP_PORT", "587").strip()

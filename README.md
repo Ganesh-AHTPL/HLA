@@ -347,4 +347,3 @@ Open `http://localhost:3000` in your web browser.
 7. **Validate & Deploy**:
    - Click **`🧪 Validate & Dry-Run`** to test DDL syntax inside an isolated rollback transaction.
    - Click **`🚀 Deploy to Target DB`** to provision the schemas and tables directly into your database.
->>>>>>> 0d4c3d4 (feat: implement secure OTP password reset, real SMTP delivery diagnostics, and error handling)

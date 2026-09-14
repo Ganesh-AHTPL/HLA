@@ -1184,10 +1184,10 @@
   background: var(--card, #131b2e) !important;
   border: 1px solid var(--border-dark, rgba(255, 255, 255, 0.2)) !important;
   border-radius: var(--radius, 12px) !important;
-  width: 100% !important;
-  max-width: 660px !important;
-  max-height: 90vh !important;
-  overflow-y: auto !important;
+  width: 95% !important;
+  max-width: 620px !important;
+  max-height: calc(100vh - 36px) !important;
+  overflow: hidden !important;
   box-shadow: 0 25px 60px -10px rgba(0, 0, 0, 0.8) !important;
   display: flex !important;
   flex-direction: column !important;
@@ -1195,6 +1195,52 @@
   animation: modal-enter 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
   position: relative !important;
   z-index: 10001 !important;
+}
+
+.target-config-modal .modal-header {
+  padding: 0.65rem 1.15rem !important;
+  flex-shrink: 0 !important;
+}
+
+.target-config-modal .target-mode-selector {
+  flex-shrink: 0 !important;
+  margin: 0.4rem 1.15rem 0 !important;
+  padding: 0.2rem 0.35rem !important;
+}
+
+.target-config-modal form {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.target-config-modal .modal-body {
+  overflow-y: auto !important;
+  flex: 1 !important;
+  min-height: 0 !important;
+  padding: 0.65rem 1.15rem !important;
+}
+
+.target-config-modal .modal-footer {
+  flex-shrink: 0 !important;
+  padding: 0.60rem 1.15rem !important;
+  border-top: 1px solid rgba(255, 255, 255, 0.1) !important;
+  background: rgba(11, 19, 43, 0.95) !important;
+  position: sticky !important;
+  bottom: 0 !important;
+  z-index: 10 !important;
+}
+
+.target-config-modal .form-row-2col {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr !important;
+  gap: 0.50rem !important;
+}
+
+.target-config-modal .form-group {
+  margin-bottom: 0 !important;
 }
 
 @keyframes modal-enter {

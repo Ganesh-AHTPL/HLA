@@ -82,6 +82,7 @@ api.interceptors.response.use(
         }
 
         api.defaults.headers.common.Authorization = `Bearer ${newAccessToken}`;
+        axios.defaults.headers.common['Authorization'] = `Bearer ${newAccessToken}`;
         originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
 
         processQueue(null, newAccessToken);

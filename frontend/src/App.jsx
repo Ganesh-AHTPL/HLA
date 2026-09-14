@@ -14,6 +14,7 @@ import UserManagementModal from './components/UserManagementModal'
 import RulesModal from './components/RulesModal'
 import GlobalIntrospectModal from './components/GlobalIntrospectModal'
 import RoleInfoModal from './components/RoleInfoModal'
+import HlaAiAssistant from './components/HlaAiAssistant'
 import './components/LoginModal.css'
 import './components/UserManagementModal.css'
 import './components/RulesModal.css'
@@ -42,6 +43,7 @@ function App() {
   const [showRulesModal, setShowRulesModal] = useState(false)
   const [showIntrospectModal, setShowIntrospectModal] = useState(false)
   const [showRoleInfoModal, setShowRoleInfoModal] = useState(false)
+  const [showAiAssistant, setShowAiAssistant] = useState(false)
 
   // Navigation views: 'workspaces' | 'project-studio'
   const [activeView, setActiveView] = useState('workspaces')
@@ -288,6 +290,7 @@ function App() {
     { label: 'Switch to All Workspaces', k: 'G A', action: () => handleGoHome() },
     { label: 'Open Rules Catalog (R1–R11)', k: 'R C', action: () => setShowRulesModal(true) },
     { label: 'Open Live DB Introspector', k: 'D B', action: () => setShowIntrospectModal(true) },
+    { label: 'Open HLA AI Assistant', k: 'A I', action: () => setShowAiAssistant(true) },
     ...(userRole === 'admin' ? [{ label: 'Open User Management', k: 'U M', action: () => setShowUserMgmt(true) }] : []),
     { label: 'Log Out of HLA Studio', k: 'L O', action: handleLogout },
     { label: 'Refresh workspace', k: 'R', action: doRefresh },
@@ -342,6 +345,15 @@ function App() {
             <span className="bot">Users &amp; Permissions</span>
           </div>
         )}
+        <div
+          className="head-item"
+          onClick={() => setShowAiAssistant(true)}
+          title="Open HLA AI Assistant (Local Ollama Copilot)"
+          style={{ cursor: 'pointer', border: '1px solid rgba(56, 189, 248, 0.3)', background: 'rgba(56, 189, 248, 0.08)' }}
+        >
+          <span className="top" style={{ color: '#38bdf8' }}>✨ AI Assistant</span>
+          <span className="bot" style={{ color: '#94a3b8' }}>Local Ollama (qwen3)</span>
+        </div>
         <div className="head-item" onClick={handleLogout} title="Sign out of current account" style={{ cursor: 'pointer' }}>
           <span className="top" style={{ color: '#f87171' }}>Sign Out</span>
           <span className="bot">Log Out 🚪</span>
@@ -373,6 +385,9 @@ function App() {
         </button>
         <button className="sub-item" onClick={() => setShowIntrospectModal(true)}>
           DB Introspector
+        </button>
+        <button className="sub-item" onClick={() => setShowAiAssistant(true)} style={{ color: '#38bdf8', fontWeight: 600 }}>
+          ✨ AI Assistant
         </button>
         {userRole === 'admin' && (
           <button className="sub-item" onClick={() => setShowUserMgmt(true)}>
@@ -461,6 +476,18 @@ function App() {
             <button className="nav-item" onClick={() => setShowIntrospectModal(true)}>
               <span>Live DB Introspector</span>
               <span className="count" style={{ color: 'var(--good)' }}>Live</span>
+            </button>
+          )}
+
+          <div className="side-label">AI &amp; Intelligence</div>
+          {(!sideSearch || 'hla ai assistant'.includes(sideSearch.toLowerCase())) && (
+            <button
+              className="nav-item"
+              onClick={() => setShowAiAssistant(true)}
+              style={{ borderLeft: '3px solid #38bdf8' }}
+            >
+              <span style={{ color: '#38bdf8', fontWeight: 600 }}>✨ HLA AI Assistant</span>
+              <span className="count" style={{ color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)', borderColor: 'rgba(56, 189, 248, 0.3)' }}>qwen3</span>
             </button>
           )}
 
@@ -697,6 +724,15 @@ function App() {
         onClose={() => setShowRoleInfoModal(false)}
         currentUser={currentUser}
         onOpenUserMgmt={() => setShowUserMgmt(true)}
+      />
+
+      {/* ── HLA AI Assistant Drawer ── */}
+      <HlaAiAssistant
+        isOpen={showAiAssistant}
+        onClose={() => setShowAiAssistant(false)}
+        activeProject={activeProject}
+        activeDoc={activeDoc}
+        currentUser={currentUser}
       />
     </div>
   )

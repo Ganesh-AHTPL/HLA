@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import axios from 'axios'
+import { copyToClipboard } from '../utils/clipboard'
 import './RulesModal.css'
 
 export default function RulesModal({ isOpen, onClose, activeDocRules = null, documentId = null }) {
@@ -46,10 +47,12 @@ export default function RulesModal({ isOpen, onClose, activeDocRules = null, doc
 
   if (!isOpen) return null
 
-  const handleCopySql = (ruleId, sql) => {
-    navigator.clipboard.writeText(sql)
-    setCopiedRuleId(ruleId)
-    setTimeout(() => setCopiedRuleId(null), 2000)
+  const handleCopySql = async (ruleId, sql) => {
+    const ok = await copyToClipboard(sql)
+    if (ok) {
+      setCopiedRuleId(ruleId)
+      setTimeout(() => setCopiedRuleId(null), 2000)
+    }
   }
 
   const toggleSql = (ruleId) => {

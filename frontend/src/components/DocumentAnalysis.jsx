@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import axios from 'axios'
 import SourceDBManager from './SourceDBManager'
 import TableSchemaModal from './TableSchemaModal'
+import { copyToClipboard } from '../utils/clipboard'
 import './DocumentAnalysis.css'
 
 export default function DocumentAnalysis({ documentId, projectId, onRefreshList, currentUser }) {
@@ -618,9 +619,11 @@ export default function DocumentAnalysis({ documentId, projectId, onRefreshList,
                     <button
                       className="btn-secondary"
                       style={{ fontSize: '0.74rem', padding: '0.3rem 0.65rem' }}
-                      onClick={() => {
-                        navigator.clipboard.writeText(llmSynthesis.pyspark_pipeline)
-                        alert('PySpark code copied to clipboard!')
+                      onClick={async () => {
+                        const ok = await copyToClipboard(llmSynthesis.pyspark_pipeline)
+                        if (ok) {
+                          alert('PySpark code copied to clipboard!')
+                        }
                       }}
                     >
                       📋 Copy Script

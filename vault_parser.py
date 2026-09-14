@@ -75,7 +75,7 @@ def parse_ini_kdb_text(content: str, default_role: str = "auto", target_env_hint
         db_name = items.get("database") or items.get("database_name") or items.get("db") or items.get("dbname") or "hla_db"
         user = items.get("username") or items.get("user") or items.get("uid") or "postgres"
         pwd = items.get("password") or items.get("pwd") or items.get("pass") or ""
-        schema = items.get("schema") or items.get("schema_name") or (f"target_{env}" if is_target and env != "none" else "public")
+        schema = items.get("schema") or items.get("schema_name") or None
         conn_str = items.get("connection_string") or items.get("conn_str") or items.get("url") or None
 
         profiles.append({
@@ -168,7 +168,7 @@ def parse_json_kdb_text(content: str, default_role: str = "auto", target_env_hin
                 "source_db_name": f"Target {env.upper()}",
                 "conn_role": "target" if default_role == "target" else "source",
                 "target_env": env if default_role == "target" else "none",
-                "schema_name": data.get("schema") or data.get("schema_name") or (f"target_{env}" if default_role == "target" else "public"),
+                "schema_name": data.get("schema") or data.get("schema_name") or None,
                 "db_type": db_type,
                 "host": data.get("host") or data.get("hostname") or "localhost",
                 "port": int(data.get("port")) if data.get("port") else 5432,

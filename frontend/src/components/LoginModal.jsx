@@ -475,13 +475,17 @@ export default function LoginModal({ isOpen, onLoginSuccess, onClose, currentRol
       const res = await axios.post('/api/auth/forgot-password', {
         email: emailToSubmit
       })
-      setServerNotice(res.data?.message || 'If the email is registered, a verification code has been sent.')
+      setServerNotice(res.data?.message || 'A 6-digit verification code has been sent to your registered email.')
       setWizardStep('otp')
       setEnteredOtp('')
       setResendCooldown(60)
       setExpirySeconds(600)
     } catch (err) {
-      setForgotError(err.response?.data?.error || 'Unable to send the verification email. Please try again later.')
+      const errMsg = err.response?.data?.error || 'Unable to send the verification email. Please try again later.'
+      setForgotError(errMsg)
+      if (wizardStep === 'otp') {
+        setOtpError(errMsg)
+      }
     } finally {
       setForgotLoading(false)
     }
@@ -724,23 +728,6 @@ export default function LoginModal({ isOpen, onLoginSuccess, onClose, currentRol
               +
             </button>
           </div>
-          <div className="fb-footer-divider"></div>
-          <div className="fb-footer-links">
-            <span>{t.workspaces}</span>
-            <span>{t.scheduler}</span>
-            <span>{t.targetDb}</span>
-            <span>{t.rulesCatalog}</span>
-            <span>{t.workbench}</span>
-            <span>{t.connectors}</span>
-            <span>{t.security}</span>
-            <span>{t.settings}</span>
-            <span>{t.privacy}</span>
-            <span>{t.terms}</span>
-            <span>{t.help}</span>
-          </div>
-          <div className="fb-footer-copy">
-            {t.copyright}
-          </div>
         </div>
       </footer>
 
@@ -890,7 +877,7 @@ export default function LoginModal({ isOpen, onLoginSuccess, onClose, currentRol
                     gap: '0.5rem'
                   }}>
                     <span>ℹ️</span>
-                    <span>{serverNotice || 'If the email is registered, a verification code has been sent.'}</span>
+                    <span>{serverNotice || 'A 6-digit verification code has been sent to your registered email.'}</span>
                   </div>
 
                   <form onSubmit={handleVerifyOtp} className="fb-reset-form" style={{ width: '100%', maxWidth: '420px', margin: '0 auto' }}>

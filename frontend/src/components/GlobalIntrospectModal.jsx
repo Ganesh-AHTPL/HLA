@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import axios from 'axios'
+import { copyToClipboard } from '../utils/clipboard'
 import './GlobalIntrospectModal.css'
 
 export default function GlobalIntrospectModal({ isOpen, onClose }) {
@@ -155,11 +156,13 @@ export default function GlobalIntrospectModal({ isOpen, onClose }) {
     }
   }
 
-  const handleCopyDdl = () => {
+  const handleCopyDdl = async () => {
     if (!result?.ddl) return
-    navigator.clipboard.writeText(result.ddl)
-    setCopiedDdl(true)
-    setTimeout(() => setCopiedDdl(false), 2000)
+    const ok = await copyToClipboard(result.ddl)
+    if (ok) {
+      setCopiedDdl(true)
+      setTimeout(() => setCopiedDdl(false), 2000)
+    }
   }
 
   // Match key analysis for Reconciliation Readiness

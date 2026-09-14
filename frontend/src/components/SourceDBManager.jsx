@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import axios from 'axios'
+import api from '../services/api'
 import './SourceDBManager.css'
 
 export default function SourceDBManager({ projectId, onClose, onSaved, currentUser }) {
@@ -19,7 +19,7 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
     db_type: 'postgresql',
     host: 'localhost',
     port: '5432',
-    database_name: '',
+    database_name: 'hla_db',
     username: 'postgres',
     password: '',
     schema_name: '',
@@ -57,7 +57,7 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
   const fetchConnections = async () => {
     setLoading(true)
     try {
-      const res = await axios.get(`/api/projects/${projectId}/connections`)
+      const res = await api.get(`/api/projects/${projectId}/connections`)
       const conns = res.data || []
       // Filter for source connections
       const sources = conns.filter(c => c.conn_role !== 'target')
@@ -82,7 +82,7 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
       db_type: conn.db_type || 'postgresql',
       host: conn.host || 'localhost',
       port: conn.port ? String(conn.port) : '5432',
-      database_name: conn.database_name || '',
+      database_name: conn.database_name || (conn.host === 'localhost' ? 'hla_db' : ''),
       username: conn.username || 'postgres',
       password: '',
       schema_name: conn.schema_name || 'public',
@@ -98,7 +98,7 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
       db_type: 'postgresql',
       host: 'localhost',
       port: '5432',
-      database_name: '',
+      database_name: 'hla_db',
       username: 'postgres',
       password: '',
       schema_name: '',
@@ -111,7 +111,10 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
     setTesting(true)
     setTestResult(null)
     try {
-      const res = await axios.post(`/api/projects/${projectId}/connections/test`, formData)
+      const res = await api.post(`/api/projects/${projectId}/connections/test`, {
+        ...formData,
+        database_name: formData.database_name?.trim() || (formData.host === 'localhost' ? 'hla_db' : '')
+      })
       setTestResult(res.data)
     } catch (err) {
       setTestResult({
@@ -134,10 +137,12 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
     try {
       const payload = {
         ...formData,
+        id: activeConnId || undefined,
         source_db_name: formData.source_db_name.trim(),
+        database_name: formData.database_name?.trim() || (formData.host === 'localhost' ? 'hla_db' : ''),
         conn_role: 'source',
       }
-      const res = await axios.post(`/api/projects/${projectId}/connections`, payload)
+      const res = await api.post(`/api/projects/${projectId}/connections`, payload)
       setTestResult(res.data)
       await fetchConnections()
       if (res.data?.connection?.id) {
@@ -165,7 +170,7 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
 
     setDeleting(true)
     try {
-      await axios.delete(`/api/projects/${projectId}/connections/${activeConnId}`)
+      await api.delete(`/api/projects/${projectId}/connections/${activeConnId}`)
       await fetchConnections()
       initNewConnection()
       if (onSaved) onSaved()
@@ -186,11 +191,11 @@ export default function SourceDBManager({ projectId, onClose, onSaved, currentUs
       if (vaultFile) {
         const data = new FormData()
         data.append('file', vaultFile)
-        res = await axios.post(`/api/projects/${projectId}/vault-upload`, data, {
+        res = await api.post(`/api/projects/${projectId}/vault-upload`, data, {
           headers: { 'Content-Type': 'multipart/form-data' },
         })
       } else if (vaultText.trim()) {
-        res = await axios.post(`/api/projects/${projectId}/vault-upload`, {
+        res = await api.post(`/api/projects/${projectId}/vault-upload`, {
           raw_content: vaultText,
           filename: 'vault.ini',
         })
@@ -311,8 +316,8 @@ schema = target_prod`
 
             <form onSubmit={handleSave}>
               <div className="modal-body">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.85rem' }}>
-                  <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
+                  <p style={{ margin: 0, fontSize: '0.80rem', color: 'var(--text-dim)' }}>
                     {activeConnId
                       ? `Editing saved connection: "${formData.source_db_name}"`
                       : 'Create a new named database connection for source table introspection.'}
@@ -324,6 +329,7 @@ schema = target_prod`
                       onClick={handleDeleteConnection}
                       disabled={deleting}
                       title="Remove this connection"
+                      style={{ padding: '0.15rem 0.5rem', fontSize: '0.78rem' }}
                     >
                       🗑️ Delete
                     </button>
@@ -331,16 +337,16 @@ schema = target_prod`
                 </div>
 
                 <div className="db-grid-inputs">
-                  {/* Connection Name Field */}
-                  <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                    <label className="form-label" style={{ color: 'var(--primary)', fontWeight: 600 }}>
-                      Connection / Source Database Name *
+                  {/* Row 1: Connection Name + Default Schema */}
+                  <div className="form-group">
+                    <label className="form-label" style={{ color: 'var(--primary)', fontWeight: 600, fontSize: '0.82rem', marginBottom: '0.25rem' }}>
+                      Connection / Source DB Name *
                     </label>
                     <input
                       type="text"
                       className="form-input"
-                      style={{ border: '1px solid var(--border-focus)', background: 'var(--primary-subtle)' }}
-                      placeholder="e.g. Primary_Warehouse, Oracle_Billing, CMDB_Inventory, Snowflake_Staging"
+                      style={{ border: '1px solid var(--border-focus)', background: 'var(--primary-subtle)', padding: '0.42rem 0.65rem' }}
+                      placeholder="e.g. Primary_Warehouse, Oracle_Billing"
                       value={formData.source_db_name}
                       onChange={(e) => setFormData({ ...formData, source_db_name: e.target.value })}
                       required
@@ -348,93 +354,108 @@ schema = target_prod`
                   </div>
 
                   <div className="form-group">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                      <label className="form-label" style={{ margin: 0 }}>Database & Storage Type</label>
-                      <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>AWS • Azure • GCP • Multi-Cloud</span>
-                    </div>
+                    <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.82rem', marginBottom: '0.25rem' }}>
+                      <span>Default Schema (Optional)</span>
+                      <span style={{ fontSize: '0.72rem', color: '#94a3b8' }}>Auto-scans all</span>
+                    </label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      style={{ padding: '0.42rem 0.65rem' }}
+                      placeholder={formData.db_type === 'snowflake' ? 'PUBLIC (or blank)' : 'Auto-scans all schemas'}
+                      value={formData.schema_name}
+                      onChange={(e) => setFormData({ ...formData, schema_name: e.target.value })}
+                    />
+                  </div>
 
-                    {/* Cloud Quick Presets */}
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginBottom: '0.75rem' }}>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: formData.db_type === 'azure_sql' ? 'rgba(14,165,233,0.2)' : undefined, borderColor: formData.db_type === 'azure_sql' ? '#0ea5e9' : undefined }}
-                        onClick={() => setFormData((prev) => ({
-                          ...prev,
-                          db_type: 'azure_sql',
-                          host: 'your-server.database.windows.net',
-                          port: '1433',
-                          schema_name: 'dbo',
-                          username: 'cloudadmin'
-                        }))}
-                      >
-                        🔷 Azure SQL
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: formData.db_type === 'rds_postgres' ? 'rgba(234,88,12,0.2)' : undefined, borderColor: formData.db_type === 'rds_postgres' ? '#ea580c' : undefined }}
-                        onClick={() => setFormData((prev) => ({
-                          ...prev,
-                          db_type: 'rds_postgres',
-                          host: 'mydb.c12345.rds.amazonaws.com',
-                          port: '5432',
-                          schema_name: 'public',
-                          username: 'postgres'
-                        }))}
-                      >
-                        🟠 AWS RDS
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: formData.db_type === 'snowflake' ? 'rgba(56,189,248,0.2)' : undefined, borderColor: formData.db_type === 'snowflake' ? '#38bdf8' : undefined }}
-                        onClick={() => setFormData((prev) => ({
-                          ...prev,
-                          db_type: 'snowflake',
-                          host: 'xy12345.us-east-1',
-                          port: 'COMPUTE_WH',
-                          database_name: 'ANALYTICS_DB',
-                          schema_name: 'PUBLIC',
-                          username: 'SF_USER'
-                        }))}
-                      >
-                        ❄️ Snowflake
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
-                        onClick={() => setFormData((prev) => ({
-                          ...prev,
-                          db_type: 'mssql',
-                          host: 'localhost',
-                          port: '1433',
-                          schema_name: 'dbo',
-                          username: 'sa'
-                        }))}
-                      >
-                        🏢 MSSQL
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem' }}
-                        onClick={() => setFormData((prev) => ({
-                          ...prev,
-                          db_type: 'mysql',
-                          host: 'localhost',
-                          port: '3306',
-                          schema_name: 'mydb',
-                          username: 'root'
-                        }))}
-                      >
-                        🐬 MySQL
-                      </button>
+                  {/* Row 2: Database & Storage Type (span 2) */}
+                  <div className="form-group" style={{ gridColumn: 'span 2' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem', flexWrap: 'wrap', gap: '0.25rem' }}>
+                      <label className="form-label" style={{ margin: 0, fontSize: '0.82rem' }}>Database & Storage Type</label>
+                      {/* Cloud Quick Presets as compact chips */}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: formData.db_type === 'azure_sql' ? 'rgba(14,165,233,0.2)' : undefined, borderColor: formData.db_type === 'azure_sql' ? '#0ea5e9' : undefined }}
+                          onClick={() => setFormData((prev) => ({
+                            ...prev,
+                            db_type: 'azure_sql',
+                            host: 'your-server.database.windows.net',
+                            port: '1433',
+                            schema_name: 'dbo',
+                            username: 'cloudadmin'
+                          }))}
+                        >
+                          🔷 Azure SQL
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: formData.db_type === 'rds_postgres' ? 'rgba(234,88,12,0.2)' : undefined, borderColor: formData.db_type === 'rds_postgres' ? '#ea580c' : undefined }}
+                          onClick={() => setFormData((prev) => ({
+                            ...prev,
+                            db_type: 'rds_postgres',
+                            host: 'mydb.c12345.rds.amazonaws.com',
+                            port: '5432',
+                            schema_name: 'public',
+                            username: 'postgres'
+                          }))}
+                        >
+                          🟠 AWS RDS
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: formData.db_type === 'snowflake' ? 'rgba(56,189,248,0.2)' : undefined, borderColor: formData.db_type === 'snowflake' ? '#38bdf8' : undefined }}
+                          onClick={() => setFormData((prev) => ({
+                            ...prev,
+                            db_type: 'snowflake',
+                            host: 'xy12345.us-east-1',
+                            port: 'COMPUTE_WH',
+                            database_name: 'ANALYTICS_DB',
+                            schema_name: 'PUBLIC',
+                            username: 'SF_USER'
+                          }))}
+                        >
+                          ❄️ Snowflake
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem' }}
+                          onClick={() => setFormData((prev) => ({
+                            ...prev,
+                            db_type: 'mssql',
+                            host: 'localhost',
+                            port: '1433',
+                            schema_name: 'dbo',
+                            username: 'sa'
+                          }))}
+                        >
+                          🏢 MSSQL
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem' }}
+                          onClick={() => setFormData((prev) => ({
+                            ...prev,
+                            db_type: 'mysql',
+                            host: 'localhost',
+                            port: '3306',
+                            schema_name: 'mydb',
+                            username: 'root'
+                          }))}
+                        >
+                          🐬 MySQL
+                        </button>
+                      </div>
                     </div>
 
                     <select
                       className="form-input"
+                      style={{ padding: '0.42rem 0.65rem' }}
                       value={formData.db_type}
                       onChange={(e) => setFormData({
                         ...formData,
@@ -471,28 +492,16 @@ schema = target_prod`
                     </select>
                   </div>
 
+                  {/* Row 3: Host + Port */}
                   <div className="form-group">
-                    <label className="form-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
-                      <span>Default Schema (Optional)</span>
-                      <span style={{ fontSize: '0.74rem', color: '#94a3b8' }}>Auto-scans all schemas</span>
-                    </label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      placeholder={formData.db_type === 'snowflake' ? 'PUBLIC (or leave blank)' : 'Leave blank to scan all schemas automatically'}
-                      value={formData.schema_name}
-                      onChange={(e) => setFormData({ ...formData, schema_name: e.target.value })}
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">
+                    <label className="form-label" style={{ marginBottom: '0.25rem', fontSize: '0.82rem' }}>
                       {formData.db_type === 'snowflake' ? 'Snowflake Account Identifier' : 'Host / IP'}
                     </label>
                     <input
                       type="text"
                       className="form-input"
-                      placeholder={formData.db_type === 'snowflake' ? 'e.g. xy12345.us-east-1 or org-account' : 'localhost or db.cluster.internal'}
+                      style={{ padding: '0.42rem 0.65rem' }}
+                      placeholder={formData.db_type === 'snowflake' ? 'e.g. xy12345.us-east-1' : 'localhost or host IP'}
                       value={formData.host}
                       onChange={(e) => setFormData({ ...formData, host: e.target.value })}
                       disabled={formData.db_type === 'sandbox'}
@@ -500,12 +509,13 @@ schema = target_prod`
                   </div>
 
                   <div className="form-group">
-                    <label className="form-label">
+                    <label className="form-label" style={{ marginBottom: '0.25rem', fontSize: '0.82rem' }}>
                       {formData.db_type === 'snowflake' ? 'Warehouse (Compute Cluster)' : 'Port'}
                     </label>
                     <input
                       type="text"
                       className="form-input"
+                      style={{ padding: '0.42rem 0.65rem' }}
                       placeholder={formData.db_type === 'snowflake' ? 'COMPUTE_WH' : '5432'}
                       value={formData.port}
                       onChange={(e) => setFormData({ ...formData, port: e.target.value })}
@@ -513,22 +523,25 @@ schema = target_prod`
                     />
                   </div>
 
+                  {/* Row 4: Database Name + Username */}
                   <div className="form-group">
-                    <label className="form-label">Database Name</label>
+                    <label className="form-label" style={{ marginBottom: '0.25rem', fontSize: '0.82rem' }}>Database Name</label>
                     <input
                       type="text"
                       className="form-input"
-                      placeholder={formData.db_type === 'snowflake' ? 'e.g. ANALYTICS_DB' : 'e.g. hla_db or orders_db'}
+                      style={{ padding: '0.42rem 0.65rem' }}
+                      placeholder={formData.db_type === 'snowflake' ? 'e.g. ANALYTICS_DB' : 'e.g. hla_db'}
                       value={formData.database_name}
                       onChange={(e) => setFormData({ ...formData, database_name: e.target.value })}
                     />
                   </div>
 
                   <div className="form-group">
-                    <label className="form-label">Username</label>
+                    <label className="form-label" style={{ marginBottom: '0.25rem', fontSize: '0.82rem' }}>Username</label>
                     <input
                       type="text"
                       className="form-input"
+                      style={{ padding: '0.42rem 0.65rem' }}
                       placeholder={formData.db_type === 'snowflake' ? 'SF_USER' : 'postgres'}
                       value={formData.username}
                       onChange={(e) => setFormData({ ...formData, username: e.target.value })}
@@ -536,11 +549,13 @@ schema = target_prod`
                     />
                   </div>
 
+                  {/* Row 5: Password (span 2) */}
                   <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                    <label className="form-label">Password</label>
+                    <label className="form-label" style={{ marginBottom: '0.25rem', fontSize: '0.82rem' }}>Password</label>
                     <input
                       type="password"
                       className="form-input"
+                      style={{ padding: '0.42rem 0.65rem' }}
                       placeholder="Enter password (leave blank to keep existing)"
                       value={formData.password}
                       onChange={(e) => setFormData({ ...formData, password: e.target.value })}
@@ -550,7 +565,7 @@ schema = target_prod`
                 </div>
 
                 {testResult && (
-                  <div className={`db-test-result ${testResult.success ? 'success' : 'error'}`}>
+                  <div className={`db-test-result ${testResult.success ? 'success' : 'error'}`} style={{ padding: '0.35rem 0.65rem', fontSize: '0.82rem', marginTop: '0.35rem' }}>
                     <span>{testResult.success ? '✓' : '✕'}</span>
                     <span>{testResult.message}</span>
                   </div>
@@ -594,14 +609,14 @@ schema = target_prod`
         {/* ── Mode 2: Upload .kdb / Credential Vault File ── */}
         {managerMode === 'vault' && (
           <form onSubmit={handleVaultUpload}>
-            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-              <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+              <p style={{ margin: 0, fontSize: '0.80rem', color: 'var(--text-muted)', lineHeight: 1.35 }}>
                 Upload or paste a single <strong style={{ color: 'var(--primary)' }}>.kdb, .ini, .json, .yaml, or .xml</strong> credential vault file.
-                The engine will extract all named profile sections for your source and target databases and automatically test connectivity.
+                The engine extracts named profile sections for source/target databases and verifies connectivity.
               </p>
 
               {/* File Dropzone */}
-              <div className="vault-file-box">
+              <div className="vault-file-box" style={{ padding: '0.75rem 1rem' }}>
                 <input
                   type="file"
                   id="vault-file-input"
@@ -609,13 +624,13 @@ schema = target_prod`
                   onChange={(e) => setVaultFile(e.target.files[0] || null)}
                   style={{ display: 'none' }}
                 />
-                <label htmlFor="vault-file-input" className="vault-drop-label">
-                  <span style={{ fontSize: '1.8rem' }}>📁</span>
+                <label htmlFor="vault-file-input" className="vault-drop-label" style={{ gap: '0.65rem' }}>
+                  <span style={{ fontSize: '1.4rem' }}>📁</span>
                   <div>
-                    <span style={{ color: '#ffffff', fontWeight: 700 }}>
+                    <span style={{ color: '#ffffff', fontWeight: 700, fontSize: '0.85rem' }}>
                       {vaultFile ? vaultFile.name : 'Choose a .kdb / Vault file or drag & drop'}
                     </span>
-                    <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                    <span style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                       Supports .kdb, .ini, .json, .yaml, KeePass .xml
                     </span>
                   </div>
@@ -634,21 +649,22 @@ schema = target_prod`
 
               {/* Or Paste Raw Text */}
               <div className="vault-paste-box">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                  <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>
                     Or Paste Config Text:
                   </span>
                   <button
                     type="button"
                     className="btn-template-hint"
                     onClick={handleLoadSampleTemplate}
+                    style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}
                   >
                     Load Sample Template
                   </button>
                 </div>
                 <textarea
                   className="vault-textarea"
-                  rows={7}
+                  rows={4}
                   value={vaultText}
                   onChange={(e) => setVaultText(e.target.value)}
                   placeholder={`[source.Warehouse_DB]\nhost = localhost\nport = 5432\ndatabase = hla_db\nusername = postgres\npassword = ...\n\n[target.dev]\nschema = target_dev\n...`}

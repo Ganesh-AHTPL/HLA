@@ -12,14 +12,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from models import db, Document, Project, DBConnection, User, TargetArtifact, ControlSchedule, ControlRunHistory, EmailNotificationLog, SystemSetting, PasswordResetToken
+from models import (
+    db, Document, Project, DBConnection, User, TargetArtifact,
+    ControlSchedule, ControlRunHistory, EmailNotificationLog, SystemSetting,
+    PasswordResetToken, Role, Permission, RolePermission, AuditLog
+)
 import control_scheduler
 import email_service
-from auth import generate_token, generate_tokens, verify_refresh_token, login_required, role_required, get_current_user
+from auth import (
+    generate_token, generate_tokens, verify_refresh_token, login_required,
+    role_required, permission_required, get_current_user, log_audit_event
+)
 from analyzer import analyze_document
 from db_fetcher import test_db_connection, fetch_table_metadata, get_env_db_password, find_table_across_databases, scan_source_database
 from vault_parser import parse_credential_vault
 from target_logic_builder import build_target_logic_package, validate_target_ddl, deploy_target_ddl, generate_target_ddl, ensure_target_tables_provisioned
+import ai_service
+from governance_service import governance_bp, seed_governance_rbac
+from ctrl23_safe_impl import init_ctrl23_safe_components
 
 # Optional: only import if available
 try:
@@ -35,6 +45,8 @@ except ImportError:
     DOCX_AVAILABLE = False
 
 app = Flask(__name__)
+app.register_blueprint(governance_bp)
+
 CORS(app, origins=[
     "http://localhost:3000",
     "http://127.0.0.1:3000",
@@ -88,11 +100,12 @@ db.init_app(app)
 
 
 def seed_default_users():
-    """Ensures default admin, architect, and viewer accounts exist."""
+    """Ensures default admin, architect, and viewer accounts exist without dummy/invalid emails."""
+    admin_env_email = os.getenv("ADMIN_EMAIL", "").strip() or None
     default_users = [
-        {"username": "admin", "email": "admin@hlaproject.local", "role": "admin", "password": "admin123"},
-        {"username": "architect", "email": "architect@hlaproject.local", "role": "architect", "password": "architect123"},
-        {"username": "viewer", "email": "viewer@hlaproject.local", "role": "viewer", "password": "viewer123"},
+        {"username": "admin", "email": admin_env_email, "role": "admin", "password": "admin123"},
+        {"username": "architect", "email": None, "role": "architect", "password": "architect123"},
+        {"username": "viewer", "email": None, "role": "viewer", "password": "viewer123"},
     ]
     for udata in default_users:
         user = User.query.filter_by(username=udata["username"]).first()
@@ -107,6 +120,9 @@ def seed_default_users():
         else:
             user.role = udata["role"]
             user.set_password(udata["password"])
+            # Remove any invalid or dummy .local email from previously seeded accounts
+            if user.email and ("@hlaproject.local" in user.email.lower() or user.email.lower().endswith(".local")):
+                user.email = udata["email"]
     db.session.commit()
 
 
@@ -124,6 +140,13 @@ with app.app_context():
             conn.execute(db.text("ALTER TABLE control_schedules ADD COLUMN IF NOT EXISTS day_of_month VARCHAR(20) DEFAULT '1';"))
             conn.execute(db.text("ALTER TABLE control_run_history ADD COLUMN IF NOT EXISTS hostname VARCHAR(255);"))
             conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER DEFAULT 1;"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'ACTIVE';"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP WITH TIME ZONE;"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMP WITH TIME ZONE;"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0;"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP WITH TIME ZONE;"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS mfa_enabled BOOLEAN DEFAULT FALSE;"))
+            conn.execute(db.text("ALTER TABLE users ADD COLUMN IF NOT EXISTS role_id INTEGER REFERENCES roles(id) ON DELETE SET NULL;"))
             conn.execute(db.text("ALTER TABLE password_reset_tokens ADD COLUMN IF NOT EXISTS otp_hash VARCHAR(255);"))
             conn.execute(db.text("ALTER TABLE password_reset_tokens ADD COLUMN IF NOT EXISTS attempts INTEGER DEFAULT 0;"))
             conn.execute(db.text("ALTER TABLE password_reset_tokens ADD COLUMN IF NOT EXISTS max_attempts INTEGER DEFAULT 5;"))
@@ -137,13 +160,27 @@ with app.app_context():
                 conn.execute(db.text("ALTER TABLE password_reset_tokens ALTER COLUMN expires_at TYPE TIMESTAMP WITH TIME ZONE;"))
             except Exception:
                 pass
+            try:
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp);"))
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_audit_user_id ON audit_logs(user_id);"))
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);"))
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_audit_resource_type ON audit_logs(resource_type);"))
+                conn.execute(db.text("CREATE INDEX IF NOT EXISTS idx_audit_project_id ON audit_logs(project_id);"))
+            except Exception:
+                pass
             conn.commit()
         seed_default_users()
+        seed_governance_rbac()
+        try:
+            # CTRL-23 Path A: safe implementation components (config tables, deployment gate, readiness checks)
+            init_ctrl23_safe_components(app, db)
+        except Exception as ctrl23_err:
+            print(f"[WARNING] CTRL-23 safe impl init failed (non-fatal): {ctrl23_err}")
         try:
             control_scheduler.init_scheduler(app)
         except Exception as se:
             print(f"[WARNING] Could not start control scheduler: {se}")
-        print("[OK] Connected to PostgreSQL, initialized tables & migrations, and seeded default users.")
+        print("[OK] Connected to PostgreSQL, initialized tables & migrations, and seeded default users & governance RBAC.")
     except Exception as e:
         print(f"[WARNING] Could not initialize database tables: {e}")
 
@@ -151,6 +188,83 @@ with app.app_context():
 def allowed_file(filename: str) -> bool:
     ext = os.path.splitext(filename)[1].lower()
     return ext in ALLOWED_EXTENSIONS
+
+
+# ── CTRL-23 Diagnostic Routes ─────────────────────────────────────────────────
+
+@app.route("/api/ctrl23/deployment-gate", methods=["GET"])
+@login_required
+def ctrl23_deployment_gate():
+    """
+    CTRL-23 Deployment Gate — Section 10, Item 2.
+    Returns whether all source staging tables are populated and ready.
+    """
+    from ctrl23_safe_impl import ctrl23_deployment_blocking_gate
+    result = ctrl23_deployment_blocking_gate(db.engine)
+    status_code = 200 if result["gate_passed"] else 503
+    return jsonify(result), status_code
+
+
+@app.route("/api/ctrl23/readiness", methods=["GET"])
+@login_required
+def ctrl23_readiness():
+    """
+    CTRL-23 Readiness Check — Section 10, Item 7.
+    Returns full 29-blocker status report.
+    """
+    from ctrl23_safe_impl import ctrl23_readiness_check
+    result = ctrl23_readiness_check(db.engine)
+    status_code = 200 if result["overall_status"] == "READY" else 503
+    return jsonify(result), status_code
+
+
+@app.route("/api/ctrl23/config-audit", methods=["GET"])
+@login_required
+def ctrl23_config_audit_endpoint():
+    """
+    CTRL-23 Config Audit — Section 10, Item 6.
+    Cross-checks all 4 config tables against HLA Sheet 7 authoritative values.
+    """
+    from ctrl23_safe_impl import ctrl23_config_audit
+    result = ctrl23_config_audit(db.engine)
+    return jsonify(result), 200
+
+
+@app.route("/api/ctrl23/source-registry", methods=["GET"])
+@login_required
+def ctrl23_source_registry():
+    """
+    CTRL-23 Source Connection Registry — Section 10, Item 3.
+    Returns all 6 upstream source table descriptors from HLA Sheet 1.
+    """
+    from ctrl23_safe_impl import CTRL23_SOURCE_REGISTRY
+    return jsonify({
+        "control": "CTRL-23",
+        "hla_reference": "Sheet 1, Rows 4-9",
+        "total_sources": len(CTRL23_SOURCE_REGISTRY),
+        "all_blocked": all(s["status"] == "BLOCKED" for s in CTRL23_SOURCE_REGISTRY),
+        "sources": CTRL23_SOURCE_REGISTRY,
+    }), 200
+
+
+@app.route("/api/ctrl23/kri-shells", methods=["GET"])
+@login_required
+def ctrl23_kri_shells():
+    """
+    CTRL-23 KRI Classification SQL Shells — Section 10, Item 9.
+    Returns the KRI CASE structure and report shells for design review.
+    Shells contain <<<PLACEHOLDER>>> markers for unresolved column names.
+    NOT executable — for design review only.
+    """
+    from ctrl23_safe_impl import CTRL23_KRI_CLASSIFICATION_SHELL, CTRL23_REPORT_SHELLS
+    return jsonify({
+        "control": "CTRL-23",
+        "status": "SHELL_ONLY",
+        "warning": "These SQL shells are NOT executable. All <<<...>>> placeholders require blocker resolution.",
+        "kri_classification_shell": CTRL23_KRI_CLASSIFICATION_SHELL,
+        "report_shells": CTRL23_REPORT_SHELLS,
+    }), 200
+
 
 
 # ── Authentication & RBAC Routes ──────────────────────────────────────
@@ -164,11 +278,54 @@ def login():
     if not username or not password:
         return jsonify({"error": "Username and password are required."}), 400
 
+    now_utc = datetime.now(timezone.utc)
     user = User.query.filter(
         db.or_(User.username == username, User.email.ilike(username))
     ).first()
-    if not user or not user.check_password(password):
+
+    if not user:
+        log_audit_event("auth.login.failure", "user", None, status="FAILURE", metadata={"attempted_identifier": username, "reason": "account_not_found"})
         return jsonify({"error": "Invalid username or password."}), 401
+
+    # Check status: LOCKED
+    if user.is_currently_locked():
+        remaining_secs = int((user.locked_until - now_utc).total_seconds()) if user.locked_until else 900
+        remaining_mins = max(1, (remaining_secs + 59) // 60)
+        log_audit_event("auth.login.failure", "user", user.id, username=user.username, status="FAILURE", metadata={"reason": "account_locked", "remaining_minutes": remaining_mins})
+        return jsonify({"error": f"Account is temporarily locked due to multiple failed login attempts. Please try again in {remaining_mins} minute(s) or contact an administrator."}), 403
+    elif user.status == "LOCKED":
+        # Lock duration expired -> reset
+        user.status = "ACTIVE"
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        db.session.commit()
+
+    # Check status: DISABLED
+    if user.status == "DISABLED":
+        log_audit_event("auth.login.failure", "user", user.id, username=user.username, status="FAILURE", metadata={"reason": "account_disabled"})
+        return jsonify({"error": "Account is disabled. Please contact an administrator."}), 403
+
+    # Check password
+    if not user.check_password(password):
+        user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+        meta = {"attempt": user.failed_login_attempts, "reason": "invalid_credentials"}
+        if user.failed_login_attempts >= 5:
+            user.status = "LOCKED"
+            user.locked_until = now_utc + timedelta(minutes=15)
+            meta["account_locked"] = True
+            log_audit_event("auth.account.locked", "user", user.id, username=user.username, status="WARNING", metadata={"duration_minutes": 15, "failed_attempts": user.failed_login_attempts})
+        db.session.commit()
+        log_audit_event("auth.login.failure", "user", user.id, username=user.username, status="FAILURE", metadata=meta)
+        return jsonify({"error": "Invalid username or password."}), 401
+
+    # Login succeeded
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    user.last_login_at = now_utc
+    user.last_activity_at = now_utc
+    db.session.commit()
+
+    log_audit_event("auth.login.success", "user", user.id, username=user.username, status="SUCCESS")
 
     tokens = generate_tokens(user)
     return jsonify({
@@ -176,8 +333,9 @@ def login():
         "token": tokens["access_token"],
         "access_token": tokens["access_token"],
         "refresh_token": tokens["refresh_token"],
-        "user": user.to_dict()
+        "user": user.to_dict(include_permissions=True)
     }), 200
+
 
 
 @app.route("/api/auth/refresh", methods=["POST"])
@@ -266,64 +424,66 @@ def forgot_password():
     user = User.query.filter(User.email.ilike(email)).first()
     safe_log(f"[RESET] User lookup completed (user_found={bool(user)})")
 
+    if not user:
+        safe_log(f"[RESET] Email ID not found: {email}", level="warning")
+        return jsonify({"error": "Email ID not found."}), 404
+
     # 3. If account exists, generate and store secure hashed OTP and dispatch email
-    if user:
-        reset_record = None
-        try:
-            # Invalidate any prior active tokens for this user
-            PasswordResetToken.query.filter_by(user_id=user.id, used=False).update({"used": True})
-            db.session.commit()
+    reset_record = None
+    try:
+        # Invalidate any prior active tokens for this user
+        PasswordResetToken.query.filter_by(user_id=user.id, used=False).update({"used": True})
+        db.session.commit()
 
-            # Cryptographically secure 6-digit numeric OTP (10 min validity, max 5 attempts)
-            otp_code = f"{secrets.randbelow(1000000):06d}"
-            safe_log("[RESET] OTP generated")
-            expires_at = now_utc + timedelta(minutes=10)
+        # Cryptographically secure 6-digit numeric OTP (10 min validity, max 5 attempts)
+        otp_code = f"{secrets.randbelow(1000000):06d}"
+        safe_log("[RESET] OTP generated")
+        expires_at = now_utc + timedelta(minutes=10)
 
-            reset_record = PasswordResetToken(
-                user_id=user.id,
-                token=secrets.token_urlsafe(32),
-                expires_at=expires_at,
-                attempts=0,
-                max_attempts=5,
-                verified=False,
-                used=False
-            )
-            # Store ONLY the hashed OTP (Werkzeug PBKDF2/SHA256 standard)
-            reset_record.set_otp(otp_code)
-            db.session.add(reset_record)
-            db.session.commit()
-            safe_log("[RESET] OTP stored successfully")
+        reset_record = PasswordResetToken(
+            user_id=user.id,
+            token=secrets.token_urlsafe(32),
+            expires_at=expires_at,
+            attempts=0,
+            max_attempts=5,
+            verified=False,
+            used=False
+        )
+        # Store ONLY the hashed OTP (Werkzeug PBKDF2/SHA256 standard)
+        reset_record.set_otp(otp_code)
+        db.session.add(reset_record)
+        db.session.commit()
+        safe_log("[RESET] OTP stored successfully")
 
-            # Send OTP ONLY to the user's registered email
-            dispatch_res = email_service.send_password_reset_otp_email(user, otp_code, expires_minutes=10)
-            if not dispatch_res.get("success"):
-                # Database consistency: Invalidate/delete the token record so unusable OTP is not left active
-                try:
-                    db.session.delete(reset_record)
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
-                safe_log(f"[RESET] Email dispatch failed: {dispatch_res.get('error')}", level="error")
-                return jsonify({"error": "Unable to send the verification email. Please try again later."}), 500
-
-            safe_log("[RESET] Password reset OTP email dispatched successfully")
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            if reset_record:
-                try:
-                    db.session.delete(reset_record)
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
-            else:
+        # Send OTP ONLY to the user's registered email
+        dispatch_res = email_service.send_password_reset_otp_email(user, otp_code, expires_minutes=10)
+        if not dispatch_res.get("success"):
+            # Database consistency: Invalidate/delete the token record so unusable OTP is not left active
+            try:
+                db.session.delete(reset_record)
+                db.session.commit()
+            except Exception:
                 db.session.rollback()
-            return jsonify({"error": "Unable to send the verification email. Please try again later."}), 500
+            safe_log(f"[RESET] Email dispatch failed: {dispatch_res.get('error')}", level="error")
+            return jsonify({"error": "Unable to send the verification email. Please check SMTP configuration or try again later."}), 500
 
-    # 4. Anti-Enumeration generic response: Return the exact same response whether user exists or not
+        safe_log("[RESET] Password reset OTP email dispatched successfully")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        if reset_record:
+            try:
+                db.session.delete(reset_record)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+        else:
+            db.session.rollback()
+        return jsonify({"error": "Unable to send the verification email. Please try again later."}), 500
+
     return jsonify({
         "success": True,
-        "message": "If the email is registered, a verification code has been sent."
+        "message": "A 6-digit verification code has been sent to your registered email."
     }), 200
 
 
@@ -442,7 +602,7 @@ def reset_password_with_token_endpoint():
         # 4. Record audit event in notification/audit logs
         try:
             audit_log = EmailNotificationLog(
-                recipient_emails=user.email or f"{user.username}@hlaproject.local",
+                recipient_emails=user.email or f"{user.username}@audit-log",
                 subject="AUDIT: Password Reset Completed",
                 body_text=f"Password successfully reset for user '{user.username}' (ID: {user.id}). Sessions invalidated.",
                 body_html=f"<p>Password successfully reset for user <strong>{user.username}</strong>.</p>",
@@ -484,38 +644,57 @@ def create_user_account():
         return jsonify({"error": f"Username '{username}' already exists. Please choose another."}), 409
 
     try:
-        user = User(username=username, email=email, role=role)
+        # Resolve role_id
+        target_role = Role.query.filter_by(code=role).first()
+        user = User(
+            username=username,
+            email=email,
+            role=role,
+            role_id=target_role.id if target_role else None,
+            status="ACTIVE",
+            token_version=1
+        )
         user.set_password(password)
         db.session.add(user)
         db.session.commit()
 
+        log_audit_event("user.create", "user", user.id, username=user.username, status="SUCCESS", metadata={"role": role, "username": username})
+
         return jsonify({
             "message": f"User account '{username}' ({role.upper()}) created successfully.",
-            "user": user.to_dict()
+            "user": user.to_dict(include_permissions=True)
         }), 201
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": f"Failed to create user: {str(e)}"}), 500
 
 
+@app.route("/api/auth/logout", methods=["POST"])
+@login_required
+def logout_endpoint():
+    user = g.current_user
+    log_audit_event("auth.logout", "user", user.id, username=user.username, status="SUCCESS")
+    return jsonify({"message": "Successfully logged out."}), 200
+
+
 @app.route("/api/auth/me", methods=["GET"])
 @login_required
 def get_current_user_profile():
-    return jsonify({"user": g.current_user.to_dict()}), 200
+    return jsonify({"user": g.current_user.to_dict(include_permissions=True)}), 200
 
 
 @app.route("/api/auth/users", methods=["GET"])
 @role_required("admin")
 def list_all_users():
     users = User.query.order_by(User.id.asc()).all()
-    return jsonify([u.to_dict() for u in users]), 200
+    return jsonify([u.to_dict(include_permissions=True) for u in users]), 200
 
 
 @app.route("/api/auth/users/<int:user_id>", methods=["DELETE"])
 @role_required("admin")
 def delete_user_account(user_id):
     if hasattr(g, "current_user") and g.current_user and g.current_user.id == user_id:
-        return jsonify({"error": "You cannot delete your own active Admin account."}), 400
+        return jsonify({"error": "Action rejected: You cannot delete your own active Admin account."}), 400
 
     try:
         user = db.session.get(User, user_id)
@@ -525,6 +704,9 @@ def delete_user_account(user_id):
         username = user.username
         db.session.delete(user)
         db.session.commit()
+
+        log_audit_event("user.delete", "user", user_id, status="SUCCESS", metadata={"deleted_username": username})
+
         return jsonify({"message": f"User account '{username}' has been deleted."}), 200
     except Exception as e:
         db.session.rollback()
@@ -545,14 +727,17 @@ def update_user_account(user_id):
 
     if new_role:
         normalized_role = str(new_role).strip().lower()
-        if normalized_role not in ["admin", "architect", "viewer"]:
-            return jsonify({"error": "Role must be one of: admin, architect, viewer."}), 400
+        target_role = Role.query.filter(
+            db.or_(Role.code == normalized_role, Role.name.ilike(normalized_role))
+        ).first()
+        if not target_role:
+            return jsonify({"error": "Role must be one of: admin, architect, viewer (or valid custom role)."}), 400
 
         # Prevent admin from demoting their own active session
-        if hasattr(g, "current_user") and g.current_user and g.current_user.id == user_id and normalized_role != "admin":
-            return jsonify({"error": "You cannot remove your own Admin permissions."}), 400
+        if hasattr(g, "current_user") and g.current_user and g.current_user.id == user_id and target_role.code != "admin":
+            return jsonify({"error": "Action rejected: You cannot remove your own Admin permissions."}), 400
 
-        user.role = normalized_role
+        user.sync_role(target_role)
 
     if new_email is not None:
         user.email = str(new_email).strip() or None
@@ -562,12 +747,14 @@ def update_user_account(user_id):
         if len(pw_str) < 4:
             return jsonify({"error": "Password must be at least 4 characters long."}), 400
         user.set_password(pw_str)
+        user.token_version = (user.token_version or 1) + 1
 
     try:
         db.session.commit()
+        log_audit_event("user.update", "user", user.id, username=user.username, status="SUCCESS", metadata={"role": user.role, "email": user.email})
         return jsonify({
             "message": f"Updated permissions for user '{user.username}'. Current role: {user.role.upper()}.",
-            "user": user.to_dict()
+            "user": user.to_dict(include_permissions=True)
         }), 200
     except Exception as e:
         db.session.rollback()
@@ -918,31 +1105,51 @@ def save_project_connection(project_id):
         return jsonify({"error": "Connection/Source DB name is required"}), 400
 
     try:
-        conn = DBConnection.query.filter_by(project_id=project_id, source_db_name=source_db_name).first()
+        conn = None
+        conn_id = data.get("id") or data.get("connection_id")
+        if conn_id:
+            try:
+                conn = db.session.get(DBConnection, int(conn_id))
+                if conn and conn.project_id != project_id:
+                    conn = None
+            except Exception:
+                conn = None
+
+        if not conn:
+            conn = DBConnection.query.filter_by(project_id=project_id, source_db_name=source_db_name).first()
+
         if not conn:
             conn = DBConnection(project_id=project_id, source_db_name=source_db_name)
             db.session.add(conn)
 
+        conn.source_db_name = source_db_name
         conn.conn_role = data.get("conn_role", "source")
         conn.target_env = data.get("target_env", "none")
-        conn.schema_name = data.get("schema_name", "public")
-        conn.db_type = data.get("db_type", "postgresql").lower()
-        conn.host = data.get("host")
+        conn.schema_name = (data.get("schema_name") or "public").strip() or "public"
+        conn.db_type = (data.get("db_type") or "postgresql").lower().strip()
+        conn.host = (data.get("host") or "localhost").strip()
         raw_port = data.get("port")
         if raw_port and str(raw_port).isdigit():
             conn.port = int(raw_port)
         else:
-            conn.port = None
+            conn.port = None if conn.db_type == "snowflake" else 5432
 
         warehouse_val = data.get("warehouse")
         if not warehouse_val and raw_port and not str(raw_port).isdigit():
             warehouse_val = str(raw_port).strip()
 
-        conn.database_name = data.get("database_name")
-        conn.username = data.get("username")
+        db_name = (data.get("database_name") or "").strip()
+        if not db_name and conn.host in ("localhost", "127.0.0.1", "::1") and conn.db_type in ("postgresql", "postgres"):
+            db_name = os.getenv("PGDATABASE", "hla_db") or "hla_db"
+        conn.database_name = db_name
+
+        conn.username = (data.get("username") or "").strip() or "postgres"
         if data.get("password"):
             conn.password = data.get("password")
-        conn.connection_string = data.get("connection_string")
+        elif not conn.password and conn.host in ("localhost", "127.0.0.1", "::1") and conn.db_type in ("postgresql", "postgres"):
+            conn.password = get_env_db_password()
+
+        conn.connection_string = data.get("connection_string") or ""
         conn.vault_profile = data.get("vault_profile")
 
         # Test connection
@@ -1003,8 +1210,16 @@ def upload_credential_vault(project_id):
     if not parsed.get("success"):
         return jsonify({"error": parsed.get("message", "Failed to parse vault file.")}), 400
 
-    profiles = parsed.get("profiles", [])
-    configured = []
+    # Look for active HLA document in the project to resolve target_schema directly from the file
+    doc = Document.query.filter_by(project_id=project_id).order_by(Document.uploaded_at.desc()).first()
+    file_target_schema = None
+    if doc and doc.analysis_data:
+        co = doc.analysis_data.get("control_overview", {})
+        raw_ts = co.get("target_schema")
+        if isinstance(raw_ts, dict):
+            file_target_schema = raw_ts.get("schema_name")
+        elif isinstance(raw_ts, str) and raw_ts.strip():
+            file_target_schema = raw_ts.strip()
 
     for p in profiles:
         is_target = (p.get("conn_role") == "target")
@@ -1021,7 +1236,16 @@ def upload_credential_vault(project_id):
 
         conn.conn_role = p.get("conn_role", "source")
         conn.target_env = p.get("target_env", "none")
-        conn.schema_name = p.get("schema_name", "public")
+        p_schema = p.get("schema_name")
+        if is_target:
+            if p_schema and str(p_schema).strip() and str(p_schema).strip().lower() not in ("none", ""):
+                conn.schema_name = str(p_schema).strip()
+            elif file_target_schema:
+                conn.schema_name = file_target_schema
+            else:
+                conn.schema_name = "ra_ctrl"
+        else:
+            conn.schema_name = p_schema or "public"
         conn.db_type = p.get("db_type", "postgresql")
         conn.host = p.get("host")
         conn.port = p.get("port")
@@ -1103,6 +1327,17 @@ def upload_target_credential_vault(project_id):
             p["source_db_name"] = f"Target {target_env.upper()}"
         target_profiles = profiles
 
+    # Look for active HLA document in the project to resolve target_schema directly from the file
+    doc = Document.query.filter_by(project_id=project_id).order_by(Document.uploaded_at.desc()).first()
+    file_target_schema = None
+    if doc and doc.analysis_data:
+        co = doc.analysis_data.get("control_overview", {})
+        raw_ts = co.get("target_schema")
+        if isinstance(raw_ts, dict):
+            file_target_schema = raw_ts.get("schema_name")
+        elif isinstance(raw_ts, str) and raw_ts.strip():
+            file_target_schema = raw_ts.strip()
+
     for p in target_profiles:
         env = (p.get("target_env") or target_env).lower()
         if env not in ("dev", "prod"):
@@ -1117,8 +1352,13 @@ def upload_target_credential_vault(project_id):
             db.session.add(conn)
 
         conn.conn_role = "target"
-        conn.target_env = env
-        conn.schema_name = p.get("schema_name") or f"target_{env}"
+        p_schema = p.get("schema_name")
+        if p_schema and str(p_schema).strip() and str(p_schema).strip().lower() not in ("none", ""):
+            conn.schema_name = str(p_schema).strip()
+        elif file_target_schema:
+            conn.schema_name = file_target_schema
+        else:
+            conn.schema_name = "ra_ctrl"
         conn.db_type = (p.get("db_type") or "postgresql").lower()
         conn.host = p.get("host") or "localhost"
         conn.port = int(p.get("port")) if p.get("port") else (5432 if "postgres" in conn.db_type else 3306)
@@ -1235,88 +1475,100 @@ def save_project_target_config(project_id):
     apply_to_both = bool(data.get("apply_to_both"))
     target_envs = ["dev", "prod"] if apply_to_both else [env]
 
-    last_conn = None
-    last_success = False
-    last_msg = ""
+    try:
+        last_conn = None
+        last_success = False
+        last_msg = ""
 
-    for target_env in target_envs:
-        db_name_label = f"Target {target_env.upper()}"
-        conn = DBConnection.query.filter_by(project_id=project_id, conn_role="target", target_env=target_env).first()
-        if not conn:
-            conn = DBConnection.query.filter_by(project_id=project_id, source_db_name=db_name_label).first()
-        if not conn:
-            conn = DBConnection(project_id=project_id, source_db_name=db_name_label, conn_role="target", target_env=target_env)
-            db.session.add(conn)
+        for target_env in target_envs:
+            db_name_label = f"Target {target_env.upper()}"
+            conn = DBConnection.query.filter_by(project_id=project_id, conn_role="target", target_env=target_env).first()
+            if not conn:
+                conn = DBConnection.query.filter_by(project_id=project_id, source_db_name=db_name_label).first()
+            if not conn:
+                conn = DBConnection(project_id=project_id, source_db_name=db_name_label, conn_role="target", target_env=target_env)
+                db.session.add(conn)
 
-        conn.conn_role = "target"
-        conn.target_env = target_env
-        
-        # Schema name: respect user input; if blank, default to 'public'
-        raw_schema = data.get("schema_name")
-        if raw_schema is not None:
-            clean_schema = str(raw_schema).strip()
-            conn.schema_name = clean_schema if clean_schema else "public"
-        elif not conn.schema_name:
-            conn.schema_name = "public"
+            conn.conn_role = "target"
+            conn.target_env = target_env
+            
+            # Schema name: respect user input; if blank, look up the target schema from the HLA document
+            raw_schema = data.get("schema_name")
+            if raw_schema is not None and str(raw_schema).strip():
+                conn.schema_name = str(raw_schema).strip()
+            elif not conn.schema_name or conn.schema_name in ("public", "None", ""):
+                doc = Document.query.filter_by(project_id=project_id).order_by(Document.uploaded_at.desc()).first()
+                file_ts = None
+                if doc and doc.analysis_data:
+                    co = doc.analysis_data.get("control_overview", {})
+                    raw_ts = co.get("target_schema")
+                    file_ts = raw_ts.get("schema_name") if isinstance(raw_ts, dict) else raw_ts
+                conn.schema_name = file_ts or "ra_ctrl"
 
-        conn.db_type = (data.get("db_type") or "postgresql").lower()
-        conn.host = data.get("host") or "localhost"
-        raw_target_port = data.get("port")
-        if raw_target_port and str(raw_target_port).isdigit():
-            conn.port = int(raw_target_port)
-        else:
-            conn.port = None if conn.db_type == "snowflake" else 5432
+            conn.db_type = (data.get("db_type") or "postgresql").lower().strip()
+            conn.host = (data.get("host") or "localhost").strip()
+            raw_target_port = data.get("port")
+            if raw_target_port and str(raw_target_port).isdigit():
+                conn.port = int(raw_target_port)
+            else:
+                conn.port = None if conn.db_type == "snowflake" else 5432
 
-        warehouse_target_val = data.get("warehouse")
-        if not warehouse_target_val and raw_target_port and not str(raw_target_port).isdigit():
-            warehouse_target_val = str(raw_target_port).strip()
+            warehouse_target_val = data.get("warehouse")
+            if not warehouse_target_val and raw_target_port and not str(raw_target_port).isdigit():
+                warehouse_target_val = str(raw_target_port).strip()
 
-        conn.database_name = data.get("database_name") or "hla_db"
-        conn.username = data.get("username") or "postgres"
+            target_db_name = (data.get("database_name") or "").strip()
+            if not target_db_name and conn.host in ("localhost", "127.0.0.1", "::1") and conn.db_type in ("postgresql", "postgres"):
+                target_db_name = os.getenv("PGDATABASE", "hla_db") or "hla_db"
+            conn.database_name = target_db_name or "hla_db"
+            conn.username = (data.get("username") or "").strip() or "postgres"
 
-        # Password handling: update if provided, or retain existing, or fall back to localhost env pwd
-        new_pwd = data.get("password")
-        if new_pwd:
-            conn.password = new_pwd
-        elif not conn.password and conn.host in ("localhost", "127.0.0.1", "::1") and conn.db_type in ("postgresql", "postgres"):
-            conn.password = get_env_db_password()
+            # Password handling: update if provided, or retain existing, or fall back to localhost env pwd
+            new_pwd = data.get("password")
+            if new_pwd:
+                conn.password = new_pwd
+            elif not conn.password and conn.host in ("localhost", "127.0.0.1", "::1") and conn.db_type in ("postgresql", "postgres"):
+                conn.password = get_env_db_password()
 
-        conn.connection_string = data.get("connection_string") or ""
+            conn.connection_string = data.get("connection_string") or ""
 
-        # Test target connection
-        test_cfg = {
-            "db_type": conn.db_type,
-            "host": conn.host,
-            "port": conn.port,
-            "warehouse": warehouse_target_val or ("COMPUTE_WH" if conn.db_type == "snowflake" else None),
-            "database_name": conn.database_name,
-            "username": conn.username,
-            "password": conn.password,
-            "connection_string": conn.connection_string
-        }
-        success, msg = test_db_connection(test_cfg)
-        conn.status = "connected" if success else "failed"
-        conn.last_tested = datetime.now(timezone.utc)
-        db.session.commit()
+            # Test target connection
+            test_cfg = {
+                "db_type": conn.db_type,
+                "host": conn.host,
+                "port": conn.port,
+                "warehouse": warehouse_target_val or ("COMPUTE_WH" if conn.db_type == "snowflake" else None),
+                "database_name": conn.database_name,
+                "username": conn.username,
+                "password": conn.password,
+                "connection_string": conn.connection_string
+            }
+            success, msg = test_db_connection(test_cfg)
+            conn.status = "connected" if success else "failed"
+            conn.last_tested = datetime.now(timezone.utc)
+            db.session.commit()
 
-        last_conn = conn
-        last_success = success
-        last_msg = msg
+            last_conn = conn
+            last_success = success
+            last_msg = msg
 
-    # Retrieve all target configurations for current project
-    all_target_conns = DBConnection.query.filter_by(project_id=project_id, conn_role="target").all()
-    targets_map = {"dev": None, "prod": None}
-    for c in all_target_conns:
-        if c.target_env in targets_map:
-            targets_map[c.target_env] = c.to_dict()
+        # Retrieve all target configurations for current project
+        all_target_conns = DBConnection.query.filter_by(project_id=project_id, conn_role="target").all()
+        targets_map = {"dev": None, "prod": None}
+        for c in all_target_conns:
+            if c.target_env in targets_map:
+                targets_map[c.target_env] = c.to_dict()
 
-    env_label = "DEV & PROD" if apply_to_both else env.upper()
-    return jsonify({
-        "message": f"Target {env_label} database configured. {last_msg}",
-        "success": last_success,
-        "target": last_conn.to_dict() if last_conn else None,
-        "targets": targets_map
-    }), 200
+        env_label = "DEV & PROD" if apply_to_both else env.upper()
+        return jsonify({
+            "message": f"Target {env_label} database configured. {last_msg}",
+            "success": last_success,
+            "target": last_conn.to_dict() if last_conn else None,
+            "targets": targets_map
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": f"Failed to save target config: {str(e)}"}), 500
 
 
 @app.route("/api/projects/<int:project_id>/connections/<int:conn_id>", methods=["DELETE"])
@@ -2178,7 +2430,8 @@ def scan_source_db_endpoint(doc_id):
             "tables_found_count": found_count,
             "tables_missing_count": missing_count,
             "configured_databases": [c["source_db_name"] for c in source_configs],
-            "table_audit": audit_results
+            "table_audit": audit_results,
+            "hla_analysis_summary": analysis.get("hla_analysis_summary") or {}
         }), 200
 
     except Exception as e:
@@ -2813,7 +3066,58 @@ def test_smtp_connection_endpoint():
     override_cfg = data.get("smtp_config")
     result = email_service.test_smtp_connection(target_email, override_config=override_cfg)
     status_code = 200 if result.get("success") else 400
-    return jsonify(result), status_code
+
+# ── Local Ollama AI Assistant Endpoints ────────────────────────────────
+
+@app.route("/api/ai/status", methods=["GET"])
+@login_required
+def get_ai_status():
+    """
+    Returns sanitized Ollama AI engine readiness status.
+    Strictly reveals only safe operational information.
+    """
+    status_info = ai_service.check_ollama_health()
+    return jsonify({
+        "available": status_info.get("available", False) and status_info.get("installed", False),
+        "model": status_info.get("model", ""),
+        "error": status_info.get("error") if not status_info.get("installed") else None
+    })
+
+
+@app.route("/api/ai/chat", methods=["POST"])
+@login_required
+def ai_chat_endpoint():
+    """
+    Authenticated proxy endpoint for HLA Studio Enterprise AI Assistant.
+    Enforces RBAC, controlled context retrieval, rate limits, and safety filtering.
+    """
+    user = g.current_user
+    data = request.get_json() or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "Message content cannot be empty."}), 400
+
+    history = data.get("history", [])
+    project_id = data.get("project_id")
+    document_id = data.get("document_id")
+
+    res = ai_service.generate_ai_chat_response(
+        user=user,
+        message=message,
+        history=history,
+        project_id=project_id,
+        document_id=document_id
+    )
+
+    status_code = res.get("status_code", 200)
+    if not res.get("success", True) and status_code >= 400:
+        return jsonify({"error": res.get("error", "AI service error")}), status_code
+
+    return jsonify({
+        "success": True,
+        "response": res.get("response", ""),
+        "context_used": res.get("context_used", False)
+    }), 200
 
 
 # ── Error handlers ────────────────────────────────────────────────────

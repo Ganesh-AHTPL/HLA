@@ -13,6 +13,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
   const [runningScheduleId, setRunningScheduleId] = useState(null)
   const [selectedRunLog, setSelectedRunLog] = useState(null)
   const [statusFilter, setStatusFilter] = useState('ALL')
+  const [selectedEnvFilter, setSelectedEnvFilter] = useState('all') // 'all' | 'prod' | 'dev'
 
   // SMTP Settings Modal State
   const [showSMTPModal, setShowSMTPModal] = useState(false)
@@ -21,7 +22,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
   const [showManualRunModal, setShowManualRunModal] = useState(false)
   const [manualRunData, setManualRunData] = useState({
     document_id: projectDocs[0]?.id || '',
-    environment: 'dev',
+    environment: 'prod',
     hostname: 'localhost'
   })
   const [triggeringManualRun, setTriggeringManualRun] = useState(false)
@@ -78,15 +79,16 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
   }, [projectId])
 
   // Open Create Modal
-  const handleOpenCreate = () => {
+  const handleOpenCreate = (targetEnv = null) => {
     setEditingSchedule(null)
     const firstDoc = projectDocs[0]
     const co = firstDoc?.analysis?.control_overview || {}
     const ctrlNum = co?.identification?.control_number || (co?.control_digits ? `Control-${co.control_digits}` : 'HLA Pipeline')
+    const initialEnv = targetEnv || (selectedEnvFilter === 'dev' ? 'dev' : 'prod')
     setFormData({
       document_id: firstDoc?.id || '',
-      name: `${ctrlNum} Automated Run`,
-      environment: 'dev',
+      name: `${ctrlNum} ${initialEnv.toUpperCase()} Automated Run`,
+      environment: initialEnv,
       schedule_type: 'daily',
       run_time: '02:00',
       days_of_week: 'mon,tue,wed,thu,fri',
@@ -242,15 +244,27 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
     }
   }
 
-  // KPI Calculations
+  // KPI Calculations & Environment Breakdown
   const activeSchedulesCount = schedules.filter((s) => s.is_active).length
+  const prodSchedulesCount = schedules.filter((s) => (s.environment || 'dev').toLowerCase() === 'prod').length
+  const devSchedulesCount = schedules.filter((s) => (s.environment || 'dev').toLowerCase() === 'dev').length
+
   const lastRun = history[0] || null
   const nextScheduledRun = schedules
-    .filter((s) => s.is_active && s.next_run_at)
+    .filter((s) => s.is_active && s.next_run_at && (selectedEnvFilter === 'all' || (s.environment || 'dev').toLowerCase() === selectedEnvFilter))
     .sort((a, b) => new Date(a.next_run_at) - new Date(b.next_run_at))[0]
 
-  // Filtered History
+  // Filtered Schedules by Environment
+  const filteredSchedules = schedules.filter((s) => {
+    if (selectedEnvFilter === 'all') return true
+    return (s.environment || 'dev').toLowerCase() === selectedEnvFilter
+  })
+
+  // Filtered History by Environment and Status
   const filteredHistory = history.filter((r) => {
+    if (selectedEnvFilter !== 'all' && (r.environment || 'dev').toLowerCase() !== selectedEnvFilter) {
+      return false
+    }
     if (statusFilter === 'ALL') return true
     return r.status === statusFilter
   })
@@ -333,7 +347,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
               onClick={() => {
                 setManualRunData({
                   document_id: projectDocs[0]?.id || '',
-                  environment: 'dev',
+                  environment: selectedEnvFilter === 'dev' ? 'dev' : 'prod',
                   hostname: 'localhost'
                 })
                 setShowManualRunModal(true)
@@ -344,7 +358,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
               <span>⚡</span>
               <span>Run Control Manually</span>
             </button>
-            <button className="btn-primary btn-new-schedule" onClick={handleOpenCreate} style={{ fontSize: '1rem', padding: '0.65rem 1.35rem' }}>
+            <button className="btn-primary btn-new-schedule" onClick={() => handleOpenCreate()} style={{ fontSize: '1rem', padding: '0.65rem 1.35rem' }}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                 <line x1="12" y1="5" x2="12" y2="19" />
                 <line x1="5" y1="12" x2="19" y2="12" />
@@ -363,6 +377,11 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
             <span className="kpi-val text-cyan">{activeSchedulesCount}</span>
             <span className="kpi-subval">/ {schedules.length} total</span>
           </div>
+          <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.2rem', fontSize: '0.80rem' }}>
+            <span style={{ color: '#34d399', fontWeight: 700 }}>🟢 {prodSchedulesCount} Prod</span>
+            <span style={{ color: '#64748b' }}>•</span>
+            <span style={{ color: '#38bdf8', fontWeight: 700 }}>🟡 {devSchedulesCount} Dev</span>
+          </div>
         </div>
 
         <div className="kpi-card glass-card">
@@ -373,7 +392,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
             </span>
           </div>
           <span className="kpi-subval">
-            {nextScheduledRun ? `${nextScheduledRun.control_number} (${nextScheduledRun.timezone})` : 'Create a schedule to activate'}
+            {nextScheduledRun ? `${nextScheduledRun.control_number} [${(nextScheduledRun.environment || 'dev').toUpperCase()}] (${nextScheduledRun.timezone})` : 'Create a schedule to activate'}
           </span>
         </div>
 
@@ -394,7 +413,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
             )}
           </div>
           <span className="kpi-subval">
-            {lastRun ? `${lastRun.control_number} • ${formatDateTime(lastRun.started_at)}` : 'Ready for first run'}
+            {lastRun ? `${lastRun.control_number} [${(lastRun.environment || 'dev').toUpperCase()}] • ${formatDateTime(lastRun.started_at)}` : 'Ready for first run'}
           </span>
         </div>
 
@@ -404,23 +423,59 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
             <span className="kpi-val text-purple">{history.length}</span>
             <span className="kpi-subval">Audit Records</span>
           </div>
+          <div style={{ display: 'flex', gap: '0.6rem', marginTop: '0.2rem', fontSize: '0.80rem' }}>
+            <span style={{ color: '#34d399', fontWeight: 700 }}>🟢 {history.filter(h => (h.environment||'dev').toLowerCase()==='prod').length} Prod</span>
+            <span style={{ color: '#64748b' }}>•</span>
+            <span style={{ color: '#38bdf8', fontWeight: 700 }}>🟡 {history.filter(h => (h.environment||'dev').toLowerCase()==='dev').length} Dev</span>
+          </div>
         </div>
       </div>
 
-      {/* ── Sub-navigation Tabs ── */}
+      {/* ── Sub-navigation Tabs & Dedicated Environment Filter ── */}
       <div className="scheduler-subtabs-wrap">
         <div className="subtabs-bar">
           <button
             className={`subtab-btn ${activeTab === 'schedules' ? 'active' : ''}`}
             onClick={() => setActiveTab('schedules')}
           >
-            <span>⏰ Configured Schedules ({schedules.length})</span>
+            <span>⏰ Configured Schedules ({filteredSchedules.length})</span>
           </button>
           <button
             className={`subtab-btn ${activeTab === 'history' ? 'active' : ''}`}
             onClick={() => setActiveTab('history')}
           >
-            <span>📜 Execution History & Audit Logs ({history.length})</span>
+            <span>📜 Execution History & Audit Logs ({filteredHistory.length})</span>
+          </button>
+        </div>
+
+        {/* Dedicated Environment Segmented Switcher */}
+        <div className="env-filter-group" role="tablist" aria-label="Environment Filter">
+          <button
+            type="button"
+            className={`env-filter-btn ${selectedEnvFilter === 'all' ? 'active-all' : ''}`}
+            onClick={() => setSelectedEnvFilter('all')}
+            title="Show all environments"
+          >
+            <span>All Envs</span>
+            <span className="env-filter-count">{schedules.length}</span>
+          </button>
+          <button
+            type="button"
+            className={`env-filter-btn ${selectedEnvFilter === 'prod' ? 'active-prod' : ''}`}
+            onClick={() => setSelectedEnvFilter('prod')}
+            title="Filter schedules targeting Production Target Database"
+          >
+            <span>🟢 Production (PROD)</span>
+            <span className="env-filter-count">{prodSchedulesCount}</span>
+          </button>
+          <button
+            type="button"
+            className={`env-filter-btn ${selectedEnvFilter === 'dev' ? 'active-dev' : ''}`}
+            onClick={() => setSelectedEnvFilter('dev')}
+            title="Filter schedules targeting Development/Staging Database"
+          >
+            <span>🟡 Development (DEV)</span>
+            <span className="env-filter-count">{devSchedulesCount}</span>
           </button>
         </div>
       </div>
@@ -428,7 +483,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
       {/* ── TAB 1: Configured Schedules ── */}
       {activeTab === 'schedules' && (
         <div className="schedules-view-wrap">
-          {schedules.length === 0 ? (
+          {filteredSchedules.length === 0 ? (
             <div className="glass-card empty-schedules-card">
               <div className="empty-icon-wrap">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -436,23 +491,44 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                   <polyline points="12 6 12 12 16 14" />
                 </svg>
               </div>
-              <h3>No Control Schedules Configured</h3>
-              <p>Automate your control runs at specific daily hours, intervals, or custom cron expressions.</p>
+              <h3>
+                {selectedEnvFilter === 'prod' ? 'No Production (PROD) Control Schedules' :
+                 selectedEnvFilter === 'dev' ? 'No Development (DEV) Control Schedules' :
+                 'No Control Schedules Configured'}
+              </h3>
+              <p>
+                {selectedEnvFilter === 'prod' ?
+                  'Automate production reconciliation runs directly against your verified Target Production Database.' :
+                  'Automate your control runs at specific daily hours, intervals, or custom cron expressions.'}
+              </p>
               {!isViewer && (
-                <button className="btn-primary" onClick={handleOpenCreate}>
-                  + Create First Schedule
-                </button>
+                <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'center', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+                  <button
+                    className="btn-primary"
+                    onClick={() => handleOpenCreate(selectedEnvFilter === 'dev' ? 'dev' : 'prod')}
+                    style={selectedEnvFilter !== 'dev' ? { background: '#059669', borderColor: '#10b981' } : {}}
+                  >
+                    + Create {selectedEnvFilter === 'dev' ? 'Development (DEV)' : 'Production (PROD)'} Schedule
+                  </button>
+                  {selectedEnvFilter !== 'all' && (
+                    <button className="btn-secondary" onClick={() => setSelectedEnvFilter('all')}>
+                      View All Environments
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           ) : (
             <div className="schedules-grid">
-              {schedules.map((sched) => (
+              {filteredSchedules.map((sched) => (
                 <div key={sched.id} className={`schedule-item-card glass-card ${sched.is_active ? 'active-border' : 'paused-border'}`}>
                   {/* Card Top Row: Identification, Doc, and Primary Controls */}
                   <div className="card-top-row">
                     <div className="card-title-group">
                       <span className="ctrl-badge">{sched.control_number}</span>
-                      <span className={`env-pill env-${sched.environment}`}>{sched.environment.toUpperCase()}</span>
+                      <span className={`env-pill env-${(sched.environment || 'dev').toLowerCase()}`}>
+                        {(sched.environment || 'dev').toLowerCase() === 'prod' ? '🟢 PROD' : '🟡 DEV'}
+                      </span>
                       <h3 className="sched-name" title={sched.name}>{sched.name}</h3>
                       {sched.document_name && (
                         <span className="sched-doc-pill" title={`Linked Document: ${sched.document_name}`}>
@@ -609,8 +685,8 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                       </td>
                       <td>
                         <span className="ctrl-badge-small">{run.control_number}</span>
-                        <span style={{ marginLeft: '0.4rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                          [{run.environment.toUpperCase()}]
+                        <span className={`env-pill env-${(run.environment || 'dev').toLowerCase()}`} style={{ marginLeft: '0.45rem', fontSize: '0.72rem', padding: '0.15rem 0.45rem' }}>
+                          {(run.environment || 'dev').toLowerCase() === 'prod' ? '🟢 PROD' : '🟡 DEV'}
                         </span>
                       </td>
                       <td>
@@ -705,67 +781,88 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                 </select>
               </div>
 
-              <div className="form-group">
-                <label>Schedule Name</label>
-                <input
-                  type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  placeholder="e.g. Daily Production Nightly Reconciliation"
-                  className="form-control"
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label>Execution Hostname / Server Host <span style={{ color: '#f87171' }}>*</span></label>
-                <input
-                  type="text"
-                  value={formData.hostname}
-                  onChange={(e) => setFormData({ ...formData, hostname: e.target.value })}
-                  placeholder="e.g. localhost or db-server-01.internal"
-                  className="form-control"
-                  required
-                />
-                <small style={{ color: 'var(--text-muted)', fontSize: '0.86rem' }}>
-                  Mandatory: The scheduler works only when a valid hostname is provided.
-                </small>
-              </div>
-
               <div className="form-row-2col">
                 <div className="form-group">
-                  <label>Environment</label>
-                  <select
-                    value={formData.environment}
-                    onChange={(e) => setFormData({ ...formData, environment: e.target.value })}
+                  <label>Schedule Name <span style={{ color: '#f87171' }}>*</span></label>
+                  <input
+                    type="text"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    placeholder="e.g. Daily Production Nightly Reconciliation"
                     className="form-control"
-                  >
-                    <option value="dev">Development (Dev)</option>
-                    <option value="prod">Production (Prod)</option>
-                  </select>
+                    required
+                  />
                 </div>
 
                 <div className="form-group">
-                  <label>Frequency Type</label>
-                  <select
-                    value={formData.schedule_type}
-                    onChange={(e) => setFormData({ ...formData, schedule_type: e.target.value })}
+                  <label>Execution Hostname / Server Host <span style={{ color: '#f87171' }}>*</span></label>
+                  <input
+                    type="text"
+                    value={formData.hostname}
+                    onChange={(e) => setFormData({ ...formData, hostname: e.target.value })}
+                    placeholder="e.g. localhost or db-server-01"
                     className="form-control"
-                  >
-                    <option value="daily">Daily (At specific time)</option>
-                    <option value="hourly">Hourly (Every hour)</option>
-                    <option value="weekly">Weekly (Specific days)</option>
-                    <option value="monthly">Monthly (Specific day of month)</option>
-                    <option value="interval">Custom Interval (Minutes)</option>
-                    <option value="custom_cron">Advanced Cron Expression</option>
-                  </select>
+                    required
+                  />
                 </div>
               </div>
 
-              {formData.schedule_type === 'daily' && (
-                <div className="form-row-2col">
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>Target Environment <span style={{ color: '#f87171' }}>*</span></span>
+                  <span style={{ fontSize: '0.78rem', color: formData.environment === 'prod' ? '#34d399' : '#38bdf8', fontWeight: 600 }}>
+                    {formData.environment === 'prod' ? '🟢 Targeting Production Target DB' : '🟡 Targeting Development/Staging DB'}
+                  </span>
+                </label>
+                <div className="env-segmented-selector">
+                  <div
+                    className={`env-segmented-card ${formData.environment === 'prod' ? 'selected-prod' : ''}`}
+                    onClick={() => setFormData({ ...formData, environment: 'prod' })}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <div className="env-segmented-title" style={{ color: '#34d399' }}>
+                      <span style={{ marginRight: '0.45rem' }}>🟢</span> Production (PROD)
+                    </div>
+                    <div className="env-segmented-desc">
+                      Reconciles and writes automated audit records to the Target Production Database.
+                    </div>
+                  </div>
+                  <div
+                    className={`env-segmented-card ${formData.environment === 'dev' ? 'selected-dev' : ''}`}
+                    onClick={() => setFormData({ ...formData, environment: 'dev' })}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <div className="env-segmented-title" style={{ color: '#38bdf8' }}>
+                      <span style={{ marginRight: '0.45rem' }}>🟡</span> Development (DEV)
+                    </div>
+                    <div className="env-segmented-desc">
+                      Executes against the Target Development/Staging database for testing and verification.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {formData.schedule_type === 'daily' ? (
+                <div className="form-row-3col">
                   <div className="form-group">
-                    <label>Execution Time (HH:MM 24h)</label>
+                    <label>Frequency Type</label>
+                    <select
+                      value={formData.schedule_type}
+                      onChange={(e) => setFormData({ ...formData, schedule_type: e.target.value })}
+                      className="form-control"
+                    >
+                      <option value="daily">Daily (At specific time)</option>
+                      <option value="hourly">Hourly (Every hour)</option>
+                      <option value="weekly">Weekly (Specific days)</option>
+                      <option value="monthly">Monthly (Specific day)</option>
+                      <option value="interval">Custom Interval</option>
+                      <option value="custom_cron">Cron Expression</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label>Execution Time (HH:MM)</label>
                     <input
                       type="time"
                       value={formData.run_time}
@@ -781,13 +878,29 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                       onChange={(e) => setFormData({ ...formData, timezone: e.target.value })}
                       className="form-control"
                     >
-                      <option value="UTC">UTC (Coordinated Universal Time)</option>
+                      <option value="UTC">UTC (Universal Time)</option>
                       <option value="Asia/Kolkata">Asia/Kolkata (IST +5:30)</option>
-                      <option value="America/New_York">America/New_York (EST/EDT)</option>
-                      <option value="Europe/London">Europe/London (GMT/BST)</option>
-                      <option value="Asia/Singapore">Asia/Singapore (SGT +8:00)</option>
+                      <option value="America/New_York">America/New_York (EST)</option>
+                      <option value="Europe/London">Europe/London (GMT)</option>
+                      <option value="Asia/Singapore">Asia/Singapore (SGT)</option>
                     </select>
                   </div>
+                </div>
+              ) : (
+                <div className="form-group">
+                  <label>Frequency Type</label>
+                  <select
+                    value={formData.schedule_type}
+                    onChange={(e) => setFormData({ ...formData, schedule_type: e.target.value })}
+                    className="form-control"
+                  >
+                    <option value="daily">Daily (At specific time)</option>
+                    <option value="hourly">Hourly (Every hour)</option>
+                    <option value="weekly">Weekly (Specific days)</option>
+                    <option value="monthly">Monthly (Specific day of month)</option>
+                    <option value="interval">Custom Interval (Minutes)</option>
+                    <option value="custom_cron">Advanced Cron Expression</option>
+                  </select>
                 </div>
               )}
 
@@ -929,12 +1042,12 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
               )}
 
               {/* Automated Failure Email Notifications */}
-              <div className="form-group" style={{ marginTop: '1rem', padding: '1rem', background: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.6rem' }}>
+              <div className="form-group" style={{ marginTop: '0.35rem', padding: '0.65rem 0.85rem', background: 'rgba(239, 68, 68, 0.06)', border: '1px solid rgba(239, 68, 68, 0.25)', borderRadius: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: formData.notify_on_failure !== false ? '0.4rem' : '0' }}>
                   <label style={{ margin: 0, color: '#f87171', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.94rem' }}>
                     <span>🚨</span> Automatic Email Alerts on Failure
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', fontSize: '0.88rem', color: '#e2e8f0' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', fontSize: '0.88rem', color: '#e2e8f0', margin: 0 }}>
                     <input
                       type="checkbox"
                       checked={formData.notify_on_failure !== false}
@@ -943,22 +1056,17 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                     <span>Enabled</span>
                   </label>
                 </div>
-                <p style={{ margin: '0 0 0.6rem 0', fontSize: '0.88rem', color: '#94a3b8', lineHeight: 1.5 }}>
-                  If the scheduled control run fails or upstream data has not arrived on scheduled time, automatic alert emails will be dispatched with full diagnostic logs and missing tables.
-                </p>
-                <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label style={{ fontSize: '0.88rem', color: '#cbd5e1' }}>Alert Recipient Emails (comma-separated)</label>
-                  <input
-                    type="text"
-                    value={formData.notification_emails || ''}
-                    onChange={(e) => setFormData({ ...formData, notification_emails: e.target.value })}
-                    placeholder="e.g. data-ops@enterprise.com, oncall@domain.com"
-                    className="form-control"
-                  />
-                  <small style={{ color: '#64748b', fontSize: '0.85rem', marginTop: '0.3rem', display: 'block' }}>
-                    Alerts are sent only to the recipient email addresses specified above.
-                  </small>
-                </div>
+                {formData.notify_on_failure !== false && (
+                  <div className="form-group" style={{ marginBottom: 0 }}>
+                    <input
+                      type="text"
+                      value={formData.notification_emails || ''}
+                      onChange={(e) => setFormData({ ...formData, notification_emails: e.target.value })}
+                      placeholder="Recipient emails (comma-separated): e.g. ops@company.com, oncall@domain.com"
+                      className="form-control"
+                    />
+                  </div>
+                )}
               </div>
 
               <div className="modal-footer">
@@ -1010,30 +1118,53 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                 </select>
               </div>
 
-              <div className="form-row-2col">
-                <div className="form-group">
-                  <label>Execution Environment</label>
-                  <select
-                    value={manualRunData.environment}
-                    onChange={(e) => setManualRunData({ ...manualRunData, environment: e.target.value })}
-                    className="form-control"
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <span>Target Environment <span style={{ color: '#f87171' }}>*</span></span>
+                  <span style={{ fontSize: '0.78rem', color: manualRunData.environment === 'prod' ? '#34d399' : '#38bdf8', fontWeight: 600 }}>
+                    {manualRunData.environment === 'prod' ? '🟢 Targeting Production Target DB' : '🟡 Targeting Development/Staging DB'}
+                  </span>
+                </label>
+                <div className="env-segmented-selector">
+                  <div
+                    className={`env-segmented-card ${manualRunData.environment === 'prod' ? 'selected-prod' : ''}`}
+                    onClick={() => setManualRunData({ ...manualRunData, environment: 'prod' })}
+                    role="button"
+                    tabIndex={0}
                   >
-                    <option value="dev">Development (Dev)</option>
-                    <option value="prod">Production (Prod)</option>
-                  </select>
+                    <div className="env-segmented-title" style={{ color: '#34d399' }}>
+                      <span style={{ marginRight: '0.45rem' }}>🟢</span> Production (PROD)
+                    </div>
+                    <div className="env-segmented-desc">
+                      Execute pipeline directly against the Target Production Database.
+                    </div>
+                  </div>
+                  <div
+                    className={`env-segmented-card ${manualRunData.environment === 'dev' ? 'selected-dev' : ''}`}
+                    onClick={() => setManualRunData({ ...manualRunData, environment: 'dev' })}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <div className="env-segmented-title" style={{ color: '#38bdf8' }}>
+                      <span style={{ marginRight: '0.45rem' }}>🟡</span> Development (DEV)
+                    </div>
+                    <div className="env-segmented-desc">
+                      Execute pipeline against the Target Development/Staging Database.
+                    </div>
+                  </div>
                 </div>
+              </div>
 
-                <div className="form-group">
-                  <label>Execution Hostname <span style={{ color: '#f87171' }}>*</span></label>
-                  <input
-                    type="text"
-                    value={manualRunData.hostname}
-                    onChange={(e) => setManualRunData({ ...manualRunData, hostname: e.target.value })}
-                    placeholder="e.g. localhost or db-server-01"
-                    className="form-control"
-                    required
-                  />
-                </div>
+              <div className="form-group">
+                <label>Execution Hostname <span style={{ color: '#f87171' }}>*</span></label>
+                <input
+                  type="text"
+                  value={manualRunData.hostname}
+                  onChange={(e) => setManualRunData({ ...manualRunData, hostname: e.target.value })}
+                  placeholder="e.g. localhost or db-server-01"
+                  className="form-control"
+                  required
+                />
               </div>
 
               <div style={{ padding: '0.85rem 1rem', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: '8px', fontSize: '0.88rem', color: '#bae6fd', lineHeight: 1.5 }}>
@@ -1075,7 +1206,12 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
               <div><strong>Duration:</strong> {selectedRunLog.duration_seconds}s</div>
               <div><strong>Hostname:</strong> <span style={{ color: '#38bdf8' }}>{selectedRunLog.hostname || 'Not Provided'}</span></div>
               <div><strong>Trigger:</strong> {selectedRunLog.trigger_type}</div>
-              <div><strong>Target Env:</strong> {selectedRunLog.environment?.toUpperCase()}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                <strong>Target Env:</strong>
+                <span className={`env-pill env-${(selectedRunLog.environment || 'dev').toLowerCase()}`} style={{ fontSize: '0.72rem', padding: '0.12rem 0.45rem' }}>
+                  {(selectedRunLog.environment || 'dev').toLowerCase() === 'prod' ? '🟢 PROD' : '🟡 DEV'}
+                </span>
+              </div>
               <div><strong>Verified Tables:</strong> {selectedRunLog.tables_found_count}/{selectedRunLog.tables_checked_count}</div>
             </div>
 

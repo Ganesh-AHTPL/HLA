@@ -62,12 +62,13 @@ with app.app_context():
         sys.exit(1)
 
     print("\n[4] Resetting / Ensuring default 'admin' account...")
+    admin_env_email = os.getenv("ADMIN_EMAIL", "").strip() or None
     admin = User.query.filter_by(username="admin").first()
     if not admin:
         print("     Creating new 'admin' user...")
         admin = User(
             username="admin",
-            email="admin@hlaproject.local",
+            email=admin_env_email,
             role="admin"
         )
         admin.set_password("admin123")
@@ -76,11 +77,13 @@ with app.app_context():
         print("     Updating existing 'admin' user password to 'admin123'...")
         admin.set_password("admin123")
         admin.role = "admin"
+        if admin.email and ("@hlaproject.local" in admin.email.lower() or admin.email.lower().endswith(".local")):
+            admin.email = admin_env_email
 
     # Also ensure architect and viewer exist
     for udata in [
-        {"username": "architect", "email": "architect@hlaproject.local", "role": "architect", "password": "architect123"},
-        {"username": "viewer", "email": "viewer@hlaproject.local", "role": "viewer", "password": "viewer123"}
+        {"username": "architect", "email": None, "role": "architect", "password": "architect123"},
+        {"username": "viewer", "email": None, "role": "viewer", "password": "viewer123"}
     ]:
         u = User.query.filter_by(username=udata["username"]).first()
         if not u:
@@ -89,6 +92,8 @@ with app.app_context():
             db.session.add(u)
         else:
             u.set_password(udata["password"])
+            if u.email and ("@hlaproject.local" in u.email.lower() or u.email.lower().endswith(".local")):
+                u.email = udata["email"]
 
     db.session.commit()
     print("[OK] Admin credentials verified successfully!")

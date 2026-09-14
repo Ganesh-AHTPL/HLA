@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import axios from 'axios'
+import api from '../services/api'
+import { copyToClipboard } from '../utils/clipboard'
 import './TargetDBStudio.css'
 
 function formatSchemaString(schema) {
@@ -110,7 +111,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
 
   const fetchProjectInfo = async () => {
     try {
-      const res = await axios.get(`/api/projects/${projectId}`)
+      const res = await api.get(`/api/projects/${projectId}`)
       setProjectConns(res.data?.db_connections || [])
     } catch (err) {
       console.error('Failed to load project details:', err)
@@ -121,7 +122,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
     if (!docIdToScan) return
     setScanningSource(true)
     try {
-      const res = await axios.post(`/api/documents/${docIdToScan}/scan-source-db`)
+      const res = await api.post(`/api/documents/${docIdToScan}/scan-source-db`)
       setScanResult(res.data)
     } catch (err) {
       console.error('Source DB scan failed:', err)
@@ -186,7 +187,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
 
   const fetchTargetConfigs = async () => {
     try {
-      const res = await axios.get(`/api/projects/${projectId}/targets`)
+      const res = await api.get(`/api/projects/${projectId}/targets`)
       setTargetConfigs(res.data || { dev: null, prod: null })
     } catch (err) {
       console.error('Failed to load target database configs:', err)
@@ -195,7 +196,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
 
   const fetchTargetArtifacts = async (docId) => {
     try {
-      const res = await axios.get(`/api/documents/${docId}/target-artifacts`)
+      const res = await api.get(`/api/documents/${docId}/target-artifacts`)
       const list = res.data || []
       const map = {}
       list.forEach((a) => {
@@ -211,7 +212,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
     setTestingConn(true)
     setTestResult(null)
     try {
-      const res = await axios.post(`/api/projects/${projectId}/connections/test`, targetForm)
+      const res = await api.post(`/api/projects/${projectId}/connections/test`, targetForm)
       setTestResult(res.data)
     } catch (err) {
       setTestResult({
@@ -232,7 +233,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
         apply_to_both: applyToBoth,
         ...targetForm,
       }
-      const res = await axios.post(`/api/projects/${projectId}/targets`, payload)
+      const res = await api.post(`/api/projects/${projectId}/targets`, payload)
       setTestResult({ success: res.data?.success, message: res.data?.message })
       
       // Update targetConfigs state immediately with returned payload
@@ -279,11 +280,11 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
         if (vaultFile) {
           const data = new FormData()
           data.append('file', vaultFile)
-          res = await axios.post(`/api/projects/${projectId}/upload-vault`, data, {
+          res = await api.post(`/api/projects/${projectId}/upload-vault`, data, {
             headers: { 'Content-Type': 'multipart/form-data' },
           })
         } else if (vaultText.trim()) {
-          res = await axios.post(`/api/projects/${projectId}/upload-vault`, {
+          res = await api.post(`/api/projects/${projectId}/upload-vault`, {
             content: vaultText,
             filename: 'credentials.kdb',
           })
@@ -306,11 +307,11 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
           const data = new FormData()
           data.append('file', vaultFile)
           data.append('target_env', activeEnv)
-          res = await axios.post(`/api/projects/${projectId}/targets/vault-upload`, data, {
+          res = await api.post(`/api/projects/${projectId}/targets/vault-upload`, data, {
             headers: { 'Content-Type': 'multipart/form-data' },
           })
         } else if (vaultText.trim()) {
-          res = await axios.post(`/api/projects/${projectId}/targets/vault-upload`, {
+          res = await api.post(`/api/projects/${projectId}/targets/vault-upload`, {
             raw_content: vaultText,
             filename: 'target_credentials.kdb',
             target_env: activeEnv,
@@ -474,10 +475,10 @@ schema = target_prod`
       setTimeout(() => setBuildStep('2/4 Scanning source DB table structures (identifying HLA logic columns alone)...'), 600)
       setTimeout(() => setBuildStep(`3/4 LLM synthesizing Target Architecture for [${activeEnv.toUpperCase()}]...`), 1400)
 
-      const res = await axios.post(`/api/documents/${selectedDocId}/build-target-logic`, {
+      const res = await api.post(`/api/documents/${selectedDocId}/build-target-logic`, {
         environment: activeEnv,
         target_config: targetForm,
-      })
+      }, { timeout: 120000 })
 
       setBuildStep('4/4 Target DDL (logic columns alone), SQL & PySpark logic ready!')
       await fetchTargetArtifacts(selectedDocId)
@@ -519,7 +520,7 @@ schema = target_prod`
     setDeployResult(null)
 
     try {
-      const res = await axios.post(`/api/documents/${selectedDocId}/deploy-target`, {
+      const res = await api.post(`/api/documents/${selectedDocId}/deploy-target`, {
         environment: activeEnv,
         action: action, // 'validate' | 'deploy'
         target_config: targetForm,
@@ -549,7 +550,7 @@ schema = target_prod`
       const updatedForm = { ...targetForm, schema_name: 'public' }
       setTargetForm(updatedForm)
       // Save configuration with public schema
-      await axios.post(`/api/projects/${projectId}/targets`, {
+      await api.post(`/api/projects/${projectId}/targets`, {
         target_env: activeEnv,
         ...updatedForm,
       })
@@ -557,7 +558,7 @@ schema = target_prod`
       // Rebuild target logic targeting public schema
       setBuilding(true)
       setBuildStep('Rebuilding Target Architecture with "public" schema...')
-      await axios.post(`/api/documents/${selectedDocId}/build-target-logic`, {
+      await api.post(`/api/documents/${selectedDocId}/build-target-logic`, {
         environment: activeEnv,
         target_config: updatedForm,
       })
@@ -585,12 +586,14 @@ schema = target_prod`
     return ''
   }
 
-  const handleCopyCode = () => {
+  const handleCopyCode = async () => {
     const code = getCodeContent()
     if (!code) return
-    navigator.clipboard.writeText(code)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+    const success = await copyToClipboard(code)
+    if (success) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
   }
 
   const handleDownloadCode = () => {
@@ -1116,19 +1119,43 @@ schema = target_prod`
                 </div>
               </div>
 
-              {/* Missing Sources Warning Banner */}
+              {/* Missing Sources Warning Banner & Quality Gate Details */}
               {scanResult && scanResult.tables_missing_count > 0 && (
                 <div style={{
                   margin: '0.75rem 0',
-                  padding: '0.7rem 0.95rem',
-                  borderRadius: '6px',
-                  background: 'rgba(239, 68, 68, 0.12)',
-                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                  padding: '0.85rem 1rem',
+                  borderRadius: '8px',
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.35)',
                   color: '#fca5a5',
                   fontSize: '0.78rem',
                   lineHeight: 1.45
                 }}>
-                  ⛔ <strong>Dry-Run & Deployment Blocked</strong>: Upstream source tables were NOT found in the source database. Dry-run validation and deployment are disabled until source tables exist in the source DB.
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 800, color: '#ef4444', marginBottom: '0.35rem', fontSize: '0.84rem' }}>
+                    <span>⛔</span> Quality Gate: Upstream Sources Missing ({scanResult.tables_missing_count})
+                  </div>
+                  <div style={{ color: '#fca5a5', marginBottom: '0.5rem' }}>
+                    Dry-Run Validation and Target Deployment are strictly <strong>blocked</strong> until upstream source tables exist in the source database.
+                  </div>
+                  <div style={{ background: 'rgba(0,0,0,0.35)', padding: '0.55rem 0.75rem', borderRadius: '6px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
+                    <div style={{ marginBottom: '0.2rem' }}>
+                      <strong style={{ color: '#93c5fd' }}>Source Database:</strong> {scanResult.configured_databases?.join(', ') || 'hla (hla_db)'}
+                    </div>
+                    <div style={{ marginBottom: '0.35rem' }}>
+                      <strong style={{ color: '#93c5fd' }}>Validated Schemas:</strong> {[...new Set(scanResult.table_audit?.map((t) => t.source_schema || 'public'))].join(', ') || 'public'}
+                    </div>
+                    <div style={{ color: '#f87171', fontWeight: 700, marginBottom: '0.25rem' }}>Missing Source Objects:</div>
+                    <ul style={{ margin: 0, paddingLeft: '1.2rem', color: '#cbd5e1' }}>
+                      {scanResult.table_audit?.filter((t) => !t.table_found).map((t) => (
+                        <li key={t.table_name} style={{ marginBottom: '0.15rem' }}>
+                          <code style={{ color: '#fca5a5', fontWeight: 600 }}>
+                            {t.source_schema ? `${t.source_schema}.${t.table_name}` : t.table_name}
+                          </code>
+                          {t.source_system ? <span style={{ color: '#94a3b8', marginLeft: '0.4rem' }}>({t.source_system})</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 </div>
               )}
 
@@ -1359,25 +1386,22 @@ schema = target_prod`
             {/* Mode 1: Manual Form */}
             {configMode === 'manual' && (
               <form onSubmit={handleSaveTargetConfig}>
-                <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                  <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-dim)' }}>
+                <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
+                  <p style={{ margin: '0 0 0.2rem', fontSize: '0.80rem', color: 'var(--text-dim)', lineHeight: 1.35 }}>
                     Configure target connection credentials for environment <strong style={{ color: activeEnv === 'prod' ? 'var(--amber-400)' : 'var(--cyan-400)' }}>{activeEnv.toUpperCase()}</strong>.
-                    Generated DDL and transformation scripts will deploy to this database and schema.
+                    DDL & transformation scripts will deploy to this database and schema.
                   </p>
 
-                  <div className="form-row-2col">
-                    <div className="form-group" style={{ gridColumn: 'span 2' }}>
-                      <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                        <span>Target Database Engine / Cloud Dialect</span>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Multi-Cloud DDL & Logic</span>
-                      </label>
-
-                      {/* Quick Cloud Presets */}
-                      <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
+                  {/* Engine / Dialect row */}
+                  <div className="form-group" style={{ marginBottom: '0.15rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem', flexWrap: 'wrap', gap: '0.25rem' }}>
+                      <label style={{ margin: 0, fontSize: '0.82rem', fontWeight: 600 }}>Target Database Engine / Cloud Dialect</label>
+                      {/* Quick Cloud Presets as compact chips */}
+                      <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
                         <button
                           type="button"
                           className="btn-secondary"
-                          style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)' }}
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: targetForm.db_type === 'postgresql' ? 'rgba(59, 130, 246, 0.25)' : 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.35)' }}
                           onClick={() => setTargetForm(prev => ({
                             ...prev,
                             db_type: 'postgresql',
@@ -1385,12 +1409,12 @@ schema = target_prod`
                             schema_name: prev.schema_name || 'ra_ctrl.ctrl_23'
                           }))}
                         >
-                          🐘 PostgreSQL / RDS
+                          🐘 PostgreSQL
                         </button>
                         <button
                           type="button"
                           className="btn-secondary"
-                          style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: 'rgba(14, 165, 233, 0.1)', border: '1px solid rgba(14, 165, 233, 0.3)' }}
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: targetForm.db_type === 'azure_sql' ? 'rgba(14, 165, 233, 0.25)' : 'rgba(14, 165, 233, 0.1)', border: '1px solid rgba(14, 165, 233, 0.35)' }}
                           onClick={() => setTargetForm(prev => ({
                             ...prev,
                             db_type: 'azure_sql',
@@ -1398,12 +1422,12 @@ schema = target_prod`
                             schema_name: 'dbo'
                           }))}
                         >
-                          ☁️ Azure SQL / MSSQL
+                          ☁️ Azure SQL
                         </button>
                         <button
                           type="button"
                           className="btn-secondary"
-                          style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: 'rgba(234, 88, 12, 0.1)', border: '1px solid rgba(234, 88, 12, 0.3)' }}
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: targetForm.db_type === 'mysql' ? 'rgba(234, 88, 12, 0.25)' : 'rgba(234, 88, 12, 0.1)', border: '1px solid rgba(234, 88, 12, 0.35)' }}
                           onClick={() => setTargetForm(prev => ({
                             ...prev,
                             db_type: 'mysql',
@@ -1411,12 +1435,12 @@ schema = target_prod`
                             schema_name: 'target_db'
                           }))}
                         >
-                          🐬 MySQL / Cloud SQL
+                          🐬 MySQL
                         </button>
                         <button
                           type="button"
                           className="btn-secondary"
-                          style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: 'rgba(56, 189, 248, 0.1)', border: '1px solid rgba(56, 189, 248, 0.3)' }}
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: targetForm.db_type === 'snowflake' ? 'rgba(56, 189, 248, 0.25)' : 'rgba(56, 189, 248, 0.1)', border: '1px solid rgba(56, 189, 248, 0.35)' }}
                           onClick={() => setTargetForm(prev => ({
                             ...prev,
                             db_type: 'snowflake',
@@ -1430,7 +1454,7 @@ schema = target_prod`
                         <button
                           type="button"
                           className="btn-secondary"
-                          style={{ padding: '0.2rem 0.55rem', fontSize: '0.78rem', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)' }}
+                          style={{ padding: '0.12rem 0.45rem', fontSize: '0.74rem', background: targetForm.db_type === 'redshift' ? 'rgba(239, 68, 68, 0.25)' : 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.35)' }}
                           onClick={() => setTargetForm(prev => ({
                             ...prev,
                             db_type: 'redshift',
@@ -1438,57 +1462,61 @@ schema = target_prod`
                             schema_name: 'public'
                           }))}
                         >
-                          🔴 AWS Redshift
+                          🔴 Redshift
                         </button>
                       </div>
-
-                      <select
-                        value={targetForm.db_type}
-                        onChange={(e) => setTargetForm({
-                          ...targetForm,
-                          db_type: e.target.value,
-                          port: e.target.value === 'snowflake' ? (targetForm.port && isNaN(Number(targetForm.port)) ? targetForm.port : 'COMPUTE_WH') : (targetForm.port && !isNaN(Number(targetForm.port)) ? targetForm.port : '5432'),
-                          schema_name: e.target.value === 'snowflake' ? (targetForm.schema_name === 'ra_ctrl.ctrl_23' ? 'PUBLIC' : targetForm.schema_name) : targetForm.schema_name
-                        })}
-                        className="form-control"
-                      >
-                        <optgroup label="Cloud Data Warehouses & Big Data">
-                          <option value="snowflake">Snowflake Data Cloud</option>
-                          <option value="redshift">AWS Redshift</option>
-                          <option value="bigquery">Google Cloud BigQuery</option>
-                        </optgroup>
-                        <optgroup label="AWS Cloud Databases">
-                          <option value="rds_postgres">AWS RDS PostgreSQL / Aurora</option>
-                          <option value="rds_mysql">AWS RDS MySQL / Aurora</option>
-                          <option value="rds_mssql">AWS RDS SQL Server</option>
-                        </optgroup>
-                        <optgroup label="Azure Cloud Databases">
-                          <option value="azure_sql">Azure SQL Database / Synapse</option>
-                          <option value="azure_postgres">Azure Database for PostgreSQL</option>
-                          <option value="azure_mysql">Azure Database for MySQL</option>
-                        </optgroup>
-                        <optgroup label="Google Cloud Platform">
-                          <option value="gcp_postgres">Google Cloud SQL (PostgreSQL)</option>
-                          <option value="gcp_mysql">Google Cloud SQL (MySQL)</option>
-                        </optgroup>
-                        <optgroup label="Standard Enterprise Relational">
-                          <option value="postgresql">PostgreSQL</option>
-                          <option value="mssql">Microsoft SQL Server (MSSQL)</option>
-                          <option value="mysql">MySQL / MariaDB</option>
-                          <option value="oracle">Oracle Database</option>
-                          <option value="sqlite">SQLite / DuckDB</option>
-                          <option value="sandbox">Sandbox (Simulated Cluster)</option>
-                        </optgroup>
-                      </select>
                     </div>
 
+                    <select
+                      value={targetForm.db_type}
+                      onChange={(e) => setTargetForm({
+                        ...targetForm,
+                        db_type: e.target.value,
+                        port: e.target.value === 'snowflake' ? (targetForm.port && isNaN(Number(targetForm.port)) ? targetForm.port : 'COMPUTE_WH') : (targetForm.port && !isNaN(Number(targetForm.port)) ? targetForm.port : '5432'),
+                        schema_name: e.target.value === 'snowflake' ? (targetForm.schema_name === 'ra_ctrl.ctrl_23' ? 'PUBLIC' : targetForm.schema_name) : targetForm.schema_name
+                      })}
+                      className="form-control"
+                      style={{ padding: '0.4rem 0.65rem' }}
+                    >
+                      <optgroup label="Cloud Data Warehouses & Big Data">
+                        <option value="snowflake">Snowflake Data Cloud</option>
+                        <option value="redshift">AWS Redshift</option>
+                        <option value="bigquery">Google Cloud BigQuery</option>
+                      </optgroup>
+                      <optgroup label="AWS Cloud Databases">
+                        <option value="rds_postgres">AWS RDS PostgreSQL / Aurora</option>
+                        <option value="rds_mysql">AWS RDS MySQL / Aurora</option>
+                        <option value="rds_mssql">AWS RDS SQL Server</option>
+                      </optgroup>
+                      <optgroup label="Azure Cloud Databases">
+                        <option value="azure_sql">Azure SQL Database / Synapse</option>
+                        <option value="azure_postgres">Azure Database for PostgreSQL</option>
+                        <option value="azure_mysql">Azure Database for MySQL</option>
+                      </optgroup>
+                      <optgroup label="Google Cloud Platform">
+                        <option value="gcp_postgres">Google Cloud SQL (PostgreSQL)</option>
+                        <option value="gcp_mysql">Google Cloud SQL (MySQL)</option>
+                      </optgroup>
+                      <optgroup label="Standard Enterprise Relational">
+                        <option value="postgresql">PostgreSQL</option>
+                        <option value="mssql">Microsoft SQL Server (MSSQL)</option>
+                        <option value="mysql">MySQL / MariaDB</option>
+                        <option value="oracle">Oracle Database</option>
+                        <option value="sqlite">SQLite / DuckDB</option>
+                        <option value="sandbox">Sandbox (Simulated Cluster)</option>
+                      </optgroup>
+                    </select>
+                  </div>
+
+                  {/* Row 2: Schema + Host */}
+                  <div className="form-row-2col">
                     <div className="form-group">
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
-                        <label style={{ margin: 0 }}>Target Schema Namespace</label>
-                        <div style={{ display: 'flex', gap: '0.35rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                        <label style={{ margin: 0, fontSize: '0.82rem' }}>Target Schema Namespace</label>
+                        <div style={{ display: 'flex', gap: '0.3rem' }}>
                           <button
                             type="button"
-                            style={{ fontSize: '0.72rem', padding: '1px 7px', background: 'rgba(56, 189, 248, 0.15)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: '4px', color: '#38bdf8', cursor: 'pointer' }}
+                            style={{ fontSize: '0.70rem', padding: '1px 6px', background: 'rgba(56, 189, 248, 0.15)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: '4px', color: '#38bdf8', cursor: 'pointer' }}
                             onClick={() => setTargetForm({ ...targetForm, schema_name: 'public' })}
                             title="Set schema to public"
                           >
@@ -1496,7 +1524,7 @@ schema = target_prod`
                           </button>
                           <button
                             type="button"
-                            style={{ fontSize: '0.72rem', padding: '1px 7px', background: 'rgba(16, 185, 129, 0.15)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '4px', color: '#34d399', cursor: 'pointer' }}
+                            style={{ fontSize: '0.70rem', padding: '1px 6px', background: 'rgba(16, 185, 129, 0.15)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '4px', color: '#34d399', cursor: 'pointer' }}
                             onClick={() => setTargetForm({ ...targetForm, schema_name: '' })}
                             title="Deploy directly matching source table names (no schema prefix)"
                           >
@@ -1508,113 +1536,114 @@ schema = target_prod`
                         type="text"
                         value={targetForm.schema_name ?? ''}
                         onChange={(e) => setTargetForm({ ...targetForm, schema_name: e.target.value })}
-                        placeholder={targetForm.db_type === 'snowflake' ? 'PUBLIC' : 'public (or leave blank to match source tables)'}
+                        placeholder={targetForm.db_type === 'snowflake' ? 'PUBLIC' : 'public (or blank)'}
                         className="form-control"
+                        style={{ padding: '0.4rem 0.65rem' }}
                       />
-                      <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: '2px', display: 'block' }}>
-                        Target schema namespace. Set to <strong>public</strong> or leave blank to mirror upstream source tables directly.
-                      </span>
                     </div>
-                  </div>
 
-                  <div className="form-row-2col">
                     <div className="form-group">
-                      <label>{targetForm.db_type === 'snowflake' ? 'Snowflake Account Identifier' : 'Host / Endpoint'}</label>
+                      <label style={{ marginBottom: '0.25rem', fontSize: '0.82rem', display: 'block' }}>{targetForm.db_type === 'snowflake' ? 'Snowflake Account Identifier' : 'Host / Endpoint'}</label>
                       <input
                         type="text"
                         value={targetForm.host}
                         onChange={(e) => setTargetForm({ ...targetForm, host: e.target.value })}
-                        placeholder={targetForm.db_type === 'snowflake' ? 'e.g. xy12345.us-east-1 or org-account' : 'localhost or db.cluster.internal'}
+                        placeholder={targetForm.db_type === 'snowflake' ? 'e.g. xy12345.us-east-1' : 'localhost or host IP'}
                         className="form-control"
+                        style={{ padding: '0.4rem 0.65rem' }}
                         required
-                      />
-                    </div>
-
-                    <div className="form-group">
-                      <label>{targetForm.db_type === 'snowflake' ? 'Warehouse (Compute Cluster)' : 'Port'}</label>
-                      <input
-                        type="text"
-                        value={targetForm.port}
-                        onChange={(e) => setTargetForm({ ...targetForm, port: e.target.value })}
-                        placeholder={targetForm.db_type === 'snowflake' ? 'COMPUTE_WH' : '5432'}
-                        className="form-control"
                       />
                     </div>
                   </div>
 
+                  {/* Row 3: Database Name + Port */}
                   <div className="form-row-2col">
                     <div className="form-group">
-                      <label>Database Name</label>
+                      <label style={{ marginBottom: '0.25rem', fontSize: '0.82rem', display: 'block' }}>Database Name</label>
                       <input
                         type="text"
                         value={targetForm.database_name}
                         onChange={(e) => setTargetForm({ ...targetForm, database_name: e.target.value })}
                         placeholder="hla_db"
                         className="form-control"
+                        style={{ padding: '0.4rem 0.65rem' }}
                         required
                       />
                     </div>
 
                     <div className="form-group">
-                      <label>Username</label>
+                      <label style={{ marginBottom: '0.25rem', fontSize: '0.82rem', display: 'block' }}>{targetForm.db_type === 'snowflake' ? 'Warehouse (Compute Cluster)' : 'Port'}</label>
+                      <input
+                        type="text"
+                        value={targetForm.port}
+                        onChange={(e) => setTargetForm({ ...targetForm, port: e.target.value })}
+                        placeholder={targetForm.db_type === 'snowflake' ? 'COMPUTE_WH' : '5432'}
+                        className="form-control"
+                        style={{ padding: '0.4rem 0.65rem' }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Row 4: Username + Password */}
+                  <div className="form-row-2col">
+                    <div className="form-group">
+                      <label style={{ marginBottom: '0.25rem', fontSize: '0.82rem', display: 'block' }}>Username</label>
                       <input
                         type="text"
                         value={targetForm.username}
                         onChange={(e) => setTargetForm({ ...targetForm, username: e.target.value })}
                         placeholder="postgres"
                         className="form-control"
+                        style={{ padding: '0.4rem 0.65rem' }}
                         required
                       />
                     </div>
-                  </div>
 
-                  <div className="form-group">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.35rem' }}>
-                      <label style={{ margin: 0 }}>Password</label>
-                      {targetConfigs[activeEnv]?.has_password && (
-                        <span style={{ fontSize: '0.74rem', color: '#4ade80', fontWeight: '600' }}>
-                          🔒 Password Saved in Vault
-                        </span>
-                      )}
+                    <div className="form-group">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                        <label style={{ margin: 0, fontSize: '0.82rem' }}>Password</label>
+                        {targetConfigs[activeEnv]?.has_password && (
+                          <span style={{ fontSize: '0.72rem', color: '#4ade80', fontWeight: '600' }}>
+                            🔒 Saved in Vault
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        type="password"
+                        value={targetForm.password}
+                        onChange={(e) => setTargetForm({ ...targetForm, password: e.target.value })}
+                        placeholder={targetConfigs[activeEnv]?.has_password ? "•••••••• (Saved — leave blank)" : "Enter password"}
+                        className="form-control"
+                        style={{ padding: '0.4rem 0.65rem' }}
+                      />
                     </div>
-                    <input
-                      type="password"
-                      value={targetForm.password}
-                      onChange={(e) => setTargetForm({ ...targetForm, password: e.target.value })}
-                      placeholder={targetConfigs[activeEnv]?.has_password ? "•••••••••••• (Saved — leave blank to keep)" : "Enter target database password"}
-                      className="form-control"
-                    />
-                    {targetConfigs[activeEnv]?.has_password && !targetForm.password && (
-                      <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: '3px', display: 'block' }}>
-                        Password is securely encrypted in database. Leave blank to keep current password.
-                      </span>
-                    )}
                   </div>
 
                   {/* Sync to both environments toggle */}
                   <div style={{
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '0.55rem',
-                    padding: '0.55rem 0.85rem',
+                    gap: '0.5rem',
+                    padding: '0.35rem 0.65rem',
                     background: 'rgba(56, 189, 248, 0.08)',
                     borderRadius: '6px',
-                    border: '1px solid rgba(56, 189, 248, 0.25)'
+                    border: '1px solid rgba(56, 189, 248, 0.25)',
+                    marginTop: '0.1rem'
                   }}>
                     <input
                       type="checkbox"
                       id="sync_both_targets_check"
                       checked={applyToBoth}
                       onChange={(e) => setApplyToBoth(e.target.checked)}
-                      style={{ cursor: 'pointer', width: '15px', height: '15px' }}
+                      style={{ cursor: 'pointer', width: '14px', height: '14px' }}
                     />
-                    <label htmlFor="sync_both_targets_check" style={{ fontSize: '0.82rem', color: 'var(--text-bright)', cursor: 'pointer', margin: 0 }}>
+                    <label htmlFor="sync_both_targets_check" style={{ fontSize: '0.80rem', color: 'var(--text-bright)', cursor: 'pointer', margin: 0 }}>
                       Sync these target settings to both <strong>DEV</strong> and <strong>PROD</strong> environments
                     </label>
                   </div>
 
                   {testResult && (
-                    <div className={`test-feedback-box ${testResult.success ? 'success' : 'error'}`}>
+                    <div className={`test-feedback-box ${testResult.success ? 'success' : 'error'}`} style={{ padding: '0.35rem 0.65rem', fontSize: '0.82rem', marginTop: '0.15rem' }}>
                       <span>{testResult.success ? '✓' : '✕'}</span>
                       <span>{testResult.message}</span>
                     </div>
@@ -1646,16 +1675,16 @@ schema = target_prod`
             {/* Mode 2: Upload or Paste .kdb / Credential Vault File */}
             {configMode === 'vault' && (
               <form onSubmit={handleTargetVaultUpload}>
-                <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
                   <div className="target-vault-intro">
-                    <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-dim)', lineHeight: 1.5 }}>
+                    <p style={{ margin: 0, fontSize: '0.80rem', color: 'var(--text-dim)', lineHeight: 1.35 }}>
                       Upload or paste a <strong style={{ color: 'var(--primary)' }}>.kdb, .ini, .json, .yaml, or .xml</strong> vault file for Target DB.
                       Sections can specify <code style={{ color: '#38bdf8' }}>[target.dev]</code> and <code style={{ color: '#f59e0b' }}>[target.prod]</code>, or a unified block auto-assigned to <strong style={{ color: activeEnv === 'prod' ? 'var(--amber-400)' : 'var(--cyan-400)' }}>{activeEnv.toUpperCase()}</strong>.
                     </p>
                   </div>
 
                   {/* File Dropzone */}
-                  <div className="vault-file-box">
+                  <div className="vault-file-box" style={{ padding: '0.75rem 1rem' }}>
                     <input
                       type="file"
                       id="target-vault-file-input"
@@ -1663,13 +1692,13 @@ schema = target_prod`
                       onChange={(e) => setVaultFile(e.target.files[0] || null)}
                       style={{ display: 'none' }}
                     />
-                    <label htmlFor="target-vault-file-input" className="vault-drop-label">
-                      <span style={{ fontSize: '1.8rem' }}>📁</span>
+                    <label htmlFor="target-vault-file-input" className="vault-drop-label" style={{ gap: '0.65rem' }}>
+                      <span style={{ fontSize: '1.4rem' }}>📁</span>
                       <div>
-                        <span style={{ color: '#ffffff', fontWeight: 700 }}>
+                        <span style={{ color: '#ffffff', fontWeight: 700, fontSize: '0.85rem' }}>
                           {vaultFile ? vaultFile.name : 'Choose a Target .kdb / Vault file or drag & drop'}
                         </span>
-                        <span style={{ display: 'block', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                        <span style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
                           Supports .kdb, .ini, .json, .yaml, KeePass .xml
                         </span>
                       </div>
@@ -1688,15 +1717,16 @@ schema = target_prod`
 
                   {/* Or Paste Raw Text */}
                   <div className="vault-paste-box">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
-                      <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700 }}>
                         Or Paste .kdb Config Text:
                       </span>
-                      <div style={{ display: 'flex', gap: '0.4rem' }}>
+                      <div style={{ display: 'flex', gap: '0.35rem' }}>
                         <button
                           type="button"
                           className="btn-template-hint"
                           onClick={handleLoadSampleTargetTemplate}
+                          style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}
                         >
                           Load Sample Template
                         </button>
@@ -1705,6 +1735,7 @@ schema = target_prod`
                           className="btn-template-hint"
                           onClick={handleDownloadSampleTargetKdb}
                           title="Download sample target .kdb file"
+                          style={{ padding: '0.15rem 0.45rem', fontSize: '0.72rem' }}
                         >
                           💾 Sample .kdb
                         </button>
@@ -1712,7 +1743,7 @@ schema = target_prod`
                     </div>
                     <textarea
                       className="vault-textarea"
-                      rows={7}
+                      rows={4}
                       value={vaultText}
                       onChange={(e) => setVaultText(e.target.value)}
                       placeholder={`[target.dev]\nhost = localhost\nport = 5432\ndatabase = hla_db\nusername = postgres\npassword = your_password_here\nschema = target_dev\n\n[target.prod]\nhost = localhost\nport = 5432\ndatabase = hla_db\nusername = postgres\npassword = your_password_here\nschema = target_prod`}

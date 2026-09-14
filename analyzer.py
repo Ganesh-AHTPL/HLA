@@ -752,25 +752,44 @@ def validate_template_compliance(doc, parsed_data):
 
 # ── LLM Integration ──────────────────────────────────────────────────
 
-def call_ollama(prompt, model="llama3.2:3b", base_url="http://localhost:11434"):
+def call_ollama(prompt, model=None, base_url="http://localhost:11434"):
     """
     Calls local Ollama API to enrich and synthesize analysis.
+    Auto-discovers locally installed models if none specified.
     """
     if not REQUESTS_AVAILABLE:
         return None
     try:
+        # Determine model: explicitly passed -> env var -> auto-detect from local Ollama -> default
+        if not model:
+            model = os.getenv("OLLAMA_MODEL")
+        if not model:
+            try:
+                tag_res = requests.get(f"{base_url}/api/tags", timeout=2)
+                if tag_res.status_code == 200:
+                    installed_models = tag_res.json().get("models", [])
+                    if installed_models:
+                        model = installed_models[0].get("name")
+            except Exception:
+                pass
+        if not model:
+            model = "llama3.2:3b"
+
         url = f"{base_url}/api/generate"
         payload = {
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.2}
+            "options": {
+                "temperature": 0.2,
+                "num_predict": 180
+            }
         }
-        res = requests.post(url, json=payload, timeout=5)
+        res = requests.post(url, json=payload, timeout=45)
         if res.status_code == 200:
             return res.json().get("response", "")
-    except Exception:
-        pass
+    except Exception as e:
+        safe_log(f"[OLLAMA] Local inference warning ({model}): {e}", level="warning")
     return None
 
 

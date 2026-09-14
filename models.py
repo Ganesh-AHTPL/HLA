@@ -7,6 +7,114 @@ from werkzeug.security import generate_password_hash, check_password_hash
 db = SQLAlchemy()
 
 
+class Role(db.Model):
+    __tablename__ = "roles"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    name = db.Column(db.String(80), unique=True, nullable=False)
+    code = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+    is_system = db.Column(db.Boolean, default=False, nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+    permissions = db.relationship("Permission", secondary="role_permissions", backref="roles", lazy="joined")
+
+    def to_dict(self, include_users_count=False):
+        data = {
+            "id": self.id,
+            "name": self.name,
+            "code": self.code,
+            "description": self.description or "",
+            "is_system": self.is_system,
+            "is_active": self.is_active,
+            "permissions": [p.code for p in self.permissions],
+            "permission_count": len(self.permissions),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_users_count:
+            data["user_count"] = len(self.assigned_users) if hasattr(self, "assigned_users") else 0
+        return data
+
+    def __repr__(self):
+        return f"<Role id={self.id} code='{self.code}' name='{self.name}'>"
+
+
+class Permission(db.Model):
+    __tablename__ = "permissions"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    code = db.Column(db.String(100), unique=True, nullable=False, index=True)
+    name = db.Column(db.String(100), nullable=False)
+    category = db.Column(db.String(50), nullable=False, index=True)
+    description = db.Column(db.Text, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "code": self.code,
+            "name": self.name,
+            "category": self.category,
+            "description": self.description or "",
+        }
+
+    def __repr__(self):
+        return f"<Permission code='{self.code}'>"
+
+
+class RolePermission(db.Model):
+    __tablename__ = "role_permissions"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    role_id = db.Column(db.Integer, db.ForeignKey("roles.id", ondelete="CASCADE"), nullable=False, index=True)
+    permission_id = db.Column(db.Integer, db.ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint("role_id", "permission_id", name="uq_role_permission"),
+    )
+
+
+class AuditLog(db.Model):
+    __tablename__ = "audit_logs"
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    username = db.Column(db.String(80), nullable=True)
+    action = db.Column(db.String(100), nullable=False, index=True)
+    resource_type = db.Column(db.String(100), nullable=False, index=True)
+    resource_id = db.Column(db.String(100), nullable=True)
+    project_id = db.Column(db.Integer, db.ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = db.Column(db.String(20), default="SUCCESS", nullable=False)  # SUCCESS, FAILURE, WARNING
+    ip_address = db.Column(db.String(45), nullable=True)
+    metadata_json = db.Column(db.JSON, nullable=True)
+
+    __table_args__ = (
+        db.Index("idx_audit_composite", "timestamp", "action", "resource_type"),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "user_id": self.user_id,
+            "username": self.username or "system",
+            "action": self.action,
+            "resource_type": self.resource_type,
+            "resource_id": self.resource_id,
+            "project_id": self.project_id,
+            "status": self.status,
+            "ip_address": self.ip_address,
+            "metadata": self.metadata_json or {},
+        }
+
+    def __repr__(self):
+        return f"<AuditLog id={self.id} action='{self.action}' status='{self.status}'>"
+
+
 class User(db.Model):
     __tablename__ = "users"
 
@@ -14,11 +122,19 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False, index=True)
     email = db.Column(db.String(120), unique=True, nullable=True)
     password_hash = db.Column(db.String(255), nullable=False)
-    role = db.Column(db.String(50), default="architect", nullable=False)  # admin, architect, viewer
+    role = db.Column(db.String(50), default="architect", nullable=False)  # admin, architect, viewer (backward compatibility)
+    role_id = db.Column(db.Integer, db.ForeignKey("roles.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = db.Column(db.String(20), default="ACTIVE", nullable=False)  # ACTIVE, PENDING, LOCKED, DISABLED
+    last_login_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    last_activity_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    failed_login_attempts = db.Column(db.Integer, default=0, nullable=False)
+    locked_until = db.Column(db.DateTime(timezone=True), nullable=True)
+    mfa_enabled = db.Column(db.Boolean, default=False, nullable=False)
     token_version = db.Column(db.Integer, default=1, nullable=False)
-    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     projects = db.relationship("Project", backref="creator", lazy=True)
+    assigned_role = db.relationship("Role", backref="assigned_users", foreign_keys=[role_id], lazy="joined")
 
     def set_password(self, password: str):
         self.password_hash = generate_password_hash(password)
@@ -26,18 +142,64 @@ class User(db.Model):
     def check_password(self, password: str) -> bool:
         return check_password_hash(self.password_hash, password)
 
-    def to_dict(self):
-        return {
+    def is_currently_locked(self) -> bool:
+        if self.status == "LOCKED":
+            if self.locked_until and self.locked_until <= datetime.now(timezone.utc):
+                return False
+            return True
+        return False
+
+    def get_effective_permissions(self) -> list:
+        # Admin gets all permissions
+        effective_code = self.assigned_role.code if self.assigned_role else (self.role or "").lower()
+        if effective_code == "admin":
+            return [p.code for p in Permission.query.all()]
+        if self.assigned_role and self.assigned_role.permissions:
+            return [p.code for p in self.assigned_role.permissions]
+        return []
+
+    def has_permission(self, permission_code: str) -> bool:
+        if self.status in ["LOCKED", "DISABLED"]:
+            return False
+        effective_code = self.assigned_role.code if self.assigned_role else (self.role or "").lower()
+        if effective_code == "admin":
+            return True
+        return permission_code in self.get_effective_permissions()
+
+    def sync_role(self, role_obj: Role):
+        """Authoritative assignment ensuring role_id and legacy role string never diverge."""
+        if role_obj:
+            self.role_id = role_obj.id
+            self.role = role_obj.code
+        else:
+            self.role_id = None
+
+    def to_dict(self, include_permissions=False):
+        effective_role = self.assigned_role.code if self.assigned_role else self.role
+        role_display = self.assigned_role.name if self.assigned_role else (self.role.capitalize() if self.role else "Unknown")
+        data = {
             "id": self.id,
             "username": self.username,
             "email": self.email,
-            "role": self.role,
+            "role": effective_role,
+            "role_id": self.role_id,
+            "role_name": role_display,
+            "status": self.status or "ACTIVE",
+            "is_locked": self.is_currently_locked(),
+            "locked_until": self.locked_until.isoformat() if self.locked_until else None,
+            "failed_login_attempts": self.failed_login_attempts or 0,
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+            "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,
+            "mfa_enabled": bool(self.mfa_enabled),
             "token_version": self.token_version,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+        if include_permissions:
+            data["effective_permissions"] = self.get_effective_permissions()
+        return data
 
     def __repr__(self):
-        return f"<User id={self.id} username='{self.username}' role='{self.role}'>"
+        return f"<User id={self.id} username='{self.username}' role='{self.role}' status='{self.status}'>"
 
 
 class PasswordResetToken(db.Model):
@@ -439,5 +601,18 @@ class SystemSetting(db.Model):
 
     def __repr__(self):
         return f"<SystemSetting key='{self.key}'>"
+
+
+from sqlalchemy import event
+
+
+@event.listens_for(AuditLog, "before_update")
+def prevent_audit_update(mapper, connection, target):
+    raise ValueError("AuditLog entries are immutable and append-only. Modification is strictly prohibited.")
+
+
+@event.listens_for(AuditLog, "before_delete")
+def prevent_audit_delete(mapper, connection, target):
+    raise ValueError("AuditLog entries are immutable and append-only. Deletion is strictly prohibited.")
 
 

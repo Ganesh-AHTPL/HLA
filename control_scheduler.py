@@ -287,7 +287,7 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
     4. If tables are verified, executes target schema reconciliation.
     5. Writes detailed execution logs and status to ControlRunHistory.
     """
-    from models import db, Document, Project, DBConnection, ControlSchedule, ControlRunHistory
+    from models import db, Document, Project, DBConnection, ControlSchedule, ControlRunHistory, TargetArtifact
 
     start_time = time.time()
     now_utc = datetime.now(timezone.utc)
@@ -384,19 +384,37 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
         # STEP 2: Assemble source database connection configurations
         source_conns = DBConnection.query.filter_by(project_id=project_id, conn_role="source").all()
         source_configs = []
+        env_lower = (environment or "dev").lower()
+
+        # Check if environment-specific source connections exist
+        has_env_specific_sources = any((sc.target_env or "").lower() == env_lower for sc in source_conns)
+
         for sc in source_conns:
+            conn_env = (sc.target_env or "none").lower()
+            if has_env_specific_sources:
+                if conn_env not in (env_lower, "none", "all"):
+                    continue
+            else:
+                if conn_env not in ("none", "all", "dev", "prod"):
+                    continue
+
+            # Fallback database_name to 'hla_db' if empty for localhost postgres
+            db_name = (sc.database_name or "").strip()
+            if not db_name and sc.host in ("localhost", "127.0.0.1", "::1", None, "") and sc.db_type in ("postgresql", "postgres"):
+                db_name = os.getenv("PGDATABASE", "hla_db") or "hla_db"
+
             # Only consider connections that have valid endpoint/database info
-            if (sc.host or sc.connection_string) and (sc.database_name or sc.connection_string):
+            if (sc.host or sc.connection_string) and (db_name or sc.connection_string):
                 source_configs.append({
                     "source_db_name": sc.source_db_name,
-                    "db_type": sc.db_type,
-                    "host": sc.host,
+                    "db_type": sc.db_type or "postgresql",
+                    "host": sc.host or "localhost",
                     "port": sc.port,
-                    "database_name": sc.database_name,
-                    "username": sc.username,
-                    "password": sc.password or (get_env_db_password() if sc.host in ("localhost", "127.0.0.1", "::1") else ""),
+                    "database_name": db_name,
+                    "username": sc.username or "postgres",
+                    "password": sc.password or (get_env_db_password() if sc.host in ("localhost", "127.0.0.1", "::1", None, "") else ""),
                     "schema_name": sc.schema_name or "public",
-                    "connection_string": sc.connection_string,
+                    "connection_string": sc.connection_string or "",
                 })
 
         # STRICT QUALITY GATE: Control run works ONLY if source db and table are available!
@@ -519,7 +537,7 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
             # STEP 4: All tables verified fresh and present -> Execute Target Logic & Populate Respective Tables
             _log("QUALITY GATE PASSED: All upstream source feeds verified present and fresh with latest date data.")
 
-            # Resolve Target Database Configuration
+            # Resolve Target Database Configuration for specific environment (prod/dev)
             target_schema_name = co.get("target_schema") or f"ra_ctrl.ctrl_{co.get('control_digits', '23')}"
             if isinstance(target_schema_name, dict):
                 target_schema_name = target_schema_name.get("schema_name", "ra_ctrl")
@@ -527,23 +545,29 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
             target_conn = DBConnection.query.filter_by(
                 project_id=project_id,
                 conn_role="target",
-                target_env=environment.lower()
-            ).first() or DBConnection.query.filter_by(
-                project_id=project_id,
-                conn_role="target"
+                target_env=env_lower
             ).first()
+            if not target_conn and env_lower == "dev":
+                target_conn = DBConnection.query.filter_by(
+                    project_id=project_id,
+                    conn_role="target"
+                ).first()
 
             if target_conn:
+                target_db_name = (target_conn.database_name or "").strip()
+                if not target_db_name and target_conn.host in ("localhost", "127.0.0.1", "::1") and target_conn.db_type in ("postgresql", "postgres"):
+                    target_db_name = os.getenv("PGDATABASE", "hla_db") or "hla_db"
+
                 target_cfg = {
-                    "db_type": target_conn.db_type,
-                    "host": target_conn.host,
+                    "db_type": target_conn.db_type or "postgresql",
+                    "host": target_conn.host or "localhost",
                     "port": target_conn.port,
-                    "database_name": target_conn.database_name,
-                    "username": target_conn.username,
-                    "password": target_conn.password,
+                    "database_name": target_db_name or "hla_db",
+                    "username": target_conn.username or "postgres",
+                    "password": target_conn.password or (get_env_db_password() if target_conn.host in ("localhost", "127.0.0.1", "::1", None, "") else ""),
                     "schema_name": target_conn.schema_name or target_schema_name,
-                    "target_env": environment.lower(),
-                    "connection_string": target_conn.connection_string
+                    "target_env": env_lower,
+                    "connection_string": target_conn.connection_string or ""
                 }
             else:
                 target_cfg = {
@@ -554,44 +578,56 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
                     "username": os.getenv("PGUSER", "postgres"),
                     "password": get_env_db_password(),
                     "schema_name": target_schema_name,
-                    "target_env": environment.lower()
+                    "target_env": env_lower
                 }
 
-            if not target_cfg.get("password") and target_cfg.get("host") in ("localhost", "127.0.0.1", "::1"):
+            if not target_cfg.get("password") and target_cfg.get("host") in ("localhost", "127.0.0.1", "::1", None, ""):
                 target_cfg["password"] = get_env_db_password()
 
             target_schema = target_cfg.get("schema_name") or target_schema_name
 
-            # 4A. First time alone create required DDL (if already created, no need to create)
-            _log(f"Target DB: {target_cfg.get('host')}:{target_cfg.get('port')}/{target_cfg.get('database_name')} (Schema: {target_schema})")
-            ddl_script = generate_target_ddl(
-                target_schema,
-                target_cfg.get("db_type", "postgresql"),
-                raw_tables,
-                doc.analysis_data.get("rules", {}),
-                doc.analysis_data.get("mappings", []),
-                {},
-                doc.analysis_data
-            )
+            # Check if verified Target Artifact exists for this environment
+            target_art = TargetArtifact.query.filter_by(
+                project_id=project_id,
+                document_id=document_id,
+                environment=env_lower
+            ).order_by(TargetArtifact.created_at.desc()).first()
 
+            if target_art and target_art.generated_ddl and target_art.generated_transformation_sql:
+                _log(f"Using verified Target Artifact #{target_art.id} for [{env_lower.upper()}] environment.")
+                ddl_script = target_art.generated_ddl
+                transform_sql = target_art.generated_transformation_sql
+            else:
+                _log(f"Synthesizing Target DDL & transformation SQL for [{env_lower.upper()}] (Schema: {target_schema})...")
+                ddl_script = generate_target_ddl(
+                    target_schema,
+                    target_cfg.get("db_type", "postgresql"),
+                    raw_tables,
+                    doc.analysis_data.get("rules", {}),
+                    doc.analysis_data.get("mappings", []),
+                    {},
+                    doc.analysis_data
+                )
+                transform_sql = generate_transformation_sql(
+                    target_schema,
+                    target_cfg.get("db_type", "postgresql"),
+                    raw_tables,
+                    doc.analysis_data.get("rules", {}),
+                    doc.analysis_data.get("mappings", []),
+                    doc.analysis_data.get("config_tables"),
+                    doc.analysis_data.get("control_overview"),
+                    doc.analysis_data
+                )
+
+            # 4A. First time alone create required DDL (if already created, no need to create)
+            _log(f"Target DB [{env_lower.upper()}]: {target_cfg.get('host')}:{target_cfg.get('port')}/{target_cfg.get('database_name')} (Schema: {target_schema})")
             ddl_ok, ddl_msg, deployed_tables = ensure_target_tables_provisioned(target_cfg, ddl_script)
             _log(f"[TARGET DDL CHECK] {ddl_msg}")
             if not ddl_ok:
                 raise RuntimeError(f"Target DDL check/creation failed: {ddl_msg}")
 
             # 4B. Apply transformation logic and load into respective target tables
-            _log(f"Applying transformation logic (Append vs Truncate-and-load) into target schema '{target_schema}'...")
-            transform_sql = generate_transformation_sql(
-                target_schema,
-                target_cfg.get("db_type", "postgresql"),
-                raw_tables,
-                doc.analysis_data.get("rules", {}),
-                doc.analysis_data.get("mappings", []),
-                doc.analysis_data.get("config_tables"),
-                doc.analysis_data.get("control_overview"),
-                doc.analysis_data
-            )
-
+            _log(f"Applying transformation logic into target schema '{target_schema}' [{env_lower.upper()}]...")
             target_url = build_connection_url(target_cfg)
             target_engine = create_engine(target_url, connect_args={"connect_timeout": 12} if "sqlite" not in target_url else {})
 
@@ -612,7 +648,7 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
                                 continue
                             _log(f"[TRANSFORMATION SQL NOTICE] {sql_err}", level="WARN")
 
-            _log(f"Executed {executed_stmts} reconciliation logic transformation steps.")
+            _log(f"Executed {executed_stmts} reconciliation logic transformation steps in [{env_lower.upper()}].")
 
             # 4C. Query and verify populated rows in respective target tables
             target_counts = {}
@@ -626,9 +662,29 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
                     except Exception:
                         pass
 
+            # Update or create TargetArtifact deployment state
+            if target_art:
+                target_art.deployment_status = "deployed"
+                target_art.deployed_at = now_utc
+                target_art.deployment_log = f"Deployed via Control Run #{run_record.id} ({trigger_type}) into [{env_lower.upper()}]"
+            else:
+                new_art = TargetArtifact(
+                    project_id=project_id,
+                    document_id=document_id,
+                    environment=env_lower,
+                    target_dialect=target_cfg.get("db_type", "postgresql"),
+                    target_schema=target_schema,
+                    generated_ddl=ddl_script,
+                    generated_transformation_sql=transform_sql,
+                    deployment_status="deployed",
+                    deployed_at=now_utc,
+                    deployment_log=f"Provisioned and deployed via Control Run #{run_record.id} into [{env_lower.upper()}]"
+                )
+                db.session.add(new_art)
+
             audit_result["target_tables_summary"] = target_counts
             run_status = "SUCCESS"
-            summary = f"Control run completed successfully. Target schema '{target_schema}' populated ({len(target_counts)} tables verified). Feeds verified fresh."
+            summary = f"Control run completed successfully in [{env_lower.upper()}]. Target schema '{target_schema}' populated ({len(target_counts)} tables verified). Feeds verified fresh."
             _log(f"[OK] {summary}")
 
 

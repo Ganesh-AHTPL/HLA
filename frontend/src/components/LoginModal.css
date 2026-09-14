@@ -298,7 +298,7 @@
   width: 100%;
   background-color: #0b0f17;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 1.25rem 2rem 1.4rem 2rem;
+  padding: 0.85rem 2rem;
   font-size: 0.78rem;
   color: #8a8d91;
 }
@@ -313,7 +313,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
-  margin-bottom: 0.65rem;
+  margin-bottom: 0;
   position: relative;
 }
 

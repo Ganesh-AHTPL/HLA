@@ -15,6 +15,7 @@ export default function TopBar({
   onOpenIntrospectModal,
   theme = 'dark',
   onToggleTheme,
+  onOpenAiAssistant,
 }) {
   const userRole = currentUser?.role?.toLowerCase() || 'viewer'
   const canCreate = ['admin', 'architect'].includes(userRole)
@@ -110,6 +111,20 @@ export default function TopBar({
             <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
           </svg>
           <span>Rules (R1–R11)</span>
+        </button>
+
+        {/* HLA AI Assistant Trigger */}
+        <button
+          className="topbar-btn"
+          onClick={onOpenAiAssistant}
+          title="Open HLA AI Assistant (Local Ollama Copilot)"
+          style={{ background: 'rgba(56, 189, 248, 0.1)', borderColor: 'rgba(56, 189, 248, 0.3)', color: '#38bdf8' }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+            <circle cx="12" cy="12" r="4" />
+          </svg>
+          <span>Ask AI</span>
         </button>
 
         {/* Theme Switcher Toggle */}

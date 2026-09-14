@@ -28,14 +28,12 @@ def run_tests():
         assert allow_origin == origin, f"CORS failed for {origin}: {allow_origin}"
     print("[PASS] CORS Check: Both http://localhost:3000 and http://127.0.0.1:3000 allowed", flush=True)
 
-    # Test 2: Unregistered email (anti-enumeration)
+    # Test 2: Unregistered email returns 404 Email ID not found
     res = requests.post(f"{BASE_URL}/api/auth/forgot-password", json={"email": "nonexistent_user_9999@example.com"})
-    assert res.status_code == 200, f"Unregistered email failed: {res.text}"
+    assert res.status_code == 404, f"Unregistered email should return 404: {res.text}"
     data = res.json()
-    assert data.get("success") is True, "Success should be true"
-    assert "If the email is registered" in data.get("message", ""), "Should return anti-enumeration generic message"
-    assert "otp" not in data, "OTP must NOT be returned in API response"
-    print("[PASS] Test 2: Unregistered email returns generic anti-enumeration response (200, no OTP)", flush=True)
+    assert data.get("error") == "Email ID not found.", f"Expected 'Email ID not found.', got: {data}"
+    print("[PASS] Test 2: Unregistered email returns 404 with 'Email ID not found.'", flush=True)
 
     # Test 1: Registered email request OTP
     target_email = "architect@hlaproject.local"

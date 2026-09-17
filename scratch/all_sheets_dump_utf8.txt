@@ -1,0 +1,277 @@
+
+################################################################################
+SHEET: Source Systems (Rows: 9, Cols: 6)
+################################################################################
+R001: Source Systems - Table Name, Schema, DB, Refresh Schedule
+R003: Table name with schema | DB | Frequency | Schedule Time | Approximate End Time | Type of load
+R004: cmdb.dl_itsm_cmdb_daily_dump | 24b | Daily | Daily 6 AM IST | 15 min | Truncate and load
+R005: pearl.dl_pearl_active_profiles | 24b | Daily | Daily 9 PM IST | 15 min | Truncate and load
+R006: sfdc.copf_id | 24a | Daily | Daily 7:30 AM IST | 30 min | Truncate and load
+R007: qlik_report.dl_ra_order_report_daily | 24b | Daily | Daily 11 AM IST | 15 min | Truncate and load
+R008: ra.stg_rk_ckt_recon_final | RA Recon db | Daily | Daily 1 PM IST | 15 min | Truncate and load
+R009: reports.dl_vdom_firewall_audit_report | 24b | Weekly | Every Monday 9AM IST | 15 min | Append. (Take the latest week data for reconciliation)
+
+################################################################################
+SHEET: Attribute Mapping (Rows: 35, Cols: 5)
+################################################################################
+R001: Attribute Mapping Matrix - Target Column, Source Field/Table, Derivation Logic
+R003: Sno | Column Name | Source Field | Table Name | Remark
+R004: 1 | Application_Name | VUTM/DOOS
+R005: 2 | Host_Name | VUTM/DOOS
+R006: 3 | IP | VUTM/DOOS
+R007: 4 | CKT_Id | VUTM/DOOS
+R008: 5 | Service_Type | VUTM/DOOS
+R009: 6 | CMDB_Production_IP | CMDB
+R010: 7 | CMDB_Profile_Name | CMDB
+R011: 8 | CMDB_COPF | CMDB
+R012: 9 | CMDB_CKT_ID | CMDB
+R013: 10 | Final_CMDB_Remarks | Derived
+R014: 11 | Final_Circuit_Id | Derived
+R015: 12 | CKT_Circuit_ID | Circuit Reco
+R016: 13 | CKT_Circuit_Status | Circuit Reco
+R017: 14 | CKT_COPF | Circuit Reco
+R018: 15 | CKT_Source_System | Circuit Reco
+R019: 16 | CKT_Product | Circuit Reco
+R020: 17 | CKT_Additional_Remarks | Circuit Reco
+R021: 18 | CKT_Customer_Name | Circuit Reco
+R022: 19 | CKT_Final_Remarks | Circuit Reco
+R023: 20 | CKT_Recon_Remark_Provisioning | Circuit Reco
+R024: 21 | Recon_Remarks | Derived
+R025: 22 | SFDC_MRC | SFDC
+R026: 23 | SFDC_NRC | SFDC
+R027: 24 | SFDC_COPF_Created_dt | SFDC
+R028: 25 | SFDC_Status | SFDC
+R029: 26 | TRF_Date | Derived
+R030: 27 | Ageing_TRF | Derived
+R031: 28 | TRF_Impact | Derived
+R032: 29 | Days_Up | Derived
+R033: 30 | Impact_Up | Derived
+R034: 31 | Found_In_Billing | Derived
+R035: 32 | Product_Billing | Derived
+
+################################################################################
+SHEET: Business Rules (Rows: 22, Cols: 4)
+################################################################################
+R001: Business Rules - Input Streams (I1-I4), Filters & Reconciliation Rules (R1-R15)
+R003: Rule ID | Data Stream | Rule Description | Rule
+R004: I1 | VDOM | Input Data Stream | Get the full VDOM data from Datalake till recon run date
+R005: I2 | DDOS | Input Data Stream | Get the full DDOS data from Datalake till recon run date
+R006: I3 | CMDB | Input Data Stream | Get the full CMDB data from Datalake till recon run date
+R007: I4 | Circuit Reco | Input Data Stream | Get the full Circuit Reco data from Datalake till recon run date
+R008: R1 |  | Filter | Filter out duplicate records (Host_Name ,VDOM, IP are duplicate) in VDOM
+R009: R2 |  | Filter | Filter out records if mandatory fields (Host and IP) both are null) in VDOM
+R010: R3 |  | Filter | Filter out duplicate records (Circuit Id, COPF Id, Profile Name) in DDOS
+R011: R4 |  | Filter | Filter out records if mandatory fields (Circuit Id, COPF Id, Profile Name) all are null in DDOS
+R012: R5 |  | Filter | Filter out duplicate records (Circuit Id, Host, IP, COPF) in CMDB
+R013: R6 |  | Filter | Filter out records if mandatory fields (Circuit Id, Host, IP) all null in CMDB
+R014: R7 |  | Filter | Filter out duplicate records (Circuit Id) in Circuit Reco
+R015: R8 |  | Filter | Filter out records if mandatory fields (Circuit Id) is null in Circuit Reco
+R016: R9 |  | Filter | Remove Internal Profiles from VDOM.\nInternal profile records will be shared by user. These need to be stored in a config file and filtered out from VDOM source
+R017: R10 |  | Filter | Remove Test/Dummy IPs from CMDB\nLike:\n1.1\n1.1.1.1\n0.0.0.1\n0.0.0.0\nKeep these values in config values
+R018: R11 |  | Balance Node | Move forward with Balance dataset
+R019: R12 | VDOM Vs CMDB | VDOM Vs CMDB Reconciliation | VDOM Vs CMDB Recon Process:\n1. Match basis Ip Address\n2. Match Basis Host Name\n3. Match Basis Host Name fuzzy logic
+R020: R13 | DDOS Vs CMDB | DDOS Vs CMDB Reconciliation | DDOS Vs CMDB Recon Process:\nMatch basis Profile Name
+R021: R14 | VDOM & DDOS | Master data | Merge the VDOM and DDOS data and store in a master table with source flag (VDOM/DDOS)
+R022: R15 | VDOM/DDOS (master data) Vs Circuit Reco | VDOM/DDOS Vs CMDB Circuit Reconciliation | Using Circuit Id as match key compare the circuit status from VDOM/DDOS and Circuit Reco\n\nUsing COPF Id from Master data as match key Map with Circuit Id from Circuit Reco and compare the circuit status \n\n\n*Circuit_Id and COPF_Id are derived field from CMDB for VUTM/DDOS\n*Source level Circuit Status field not available in DDOS\n**Circuit Status in VUTM and DDOS is always Active (Enable/Disable)
+
+################################################################################
+SHEET: Buckets & KRI Logic (Rows: 23, Cols: 8)
+################################################################################
+R001: Resultant Buckets & KRI Logic (Output, KRI ID, Description, Logics, Impact, Capex)
+R003: Output result set | KRI ID | Description | Logics | Impact Type | Impact Calculation in USD | Capex in GBps | Reamrks
+R004: FB1 | - | Filtered duplicate records (Host, IP are duplicate) in VDOM
+R005: FB2 | - | Filtered records if mandatory fields (Host, IP) both are null) in VDOM
+R006: FB3 | - | Filtered duplicate records (Circuit Id, COPF Id, Profile Name) in DDOS
+R007: FB4 | - | Filtered records if mandatory fields (Circuit Id, COPF Id, Profile Name) all are null in DDOS
+R008: FB5 |  | Filtered duplicate records (Circuit Id) in Circuit Reco
+R009: FB6 |  | Filtered records if mandatory fields (Circuit Id) is null in Circuit Reco
+R010: FB7 | - | Internal Profiles
+R011: B1 |  | Master VDOM data with remarks
+R012: B2 |  | Master DDOS data with remarks
+R013: B3 |  | VDOM & DDOS Merged data
+R014: B4 |  | YN Bucket
+R015: B5 |  | YY Bucket
+R016: B6 |  | NY Bucket
+R017: B4.1 | NON-KRI01 | Unidentified Service status, due to Unavailability of Circuit id
+R018: B5.1 | KRI01 | Active in network, Under provisioning in Ordering |  | Revenue Impact & capex | If ageing > 90 days then Impact= (COPF timestamp - Current date )*MRC_IN_USD/30 | BW In GBps= Mitigation BW /1000000000 | Get MRC, NRC and COPF Creation date value from SFDC
+R019: B5.2 | KRI02 | Active in Network, Terminated in Ordering |  | Revenue Impact & capex | If ageing > 90 days, then Impact (TRF date - Current date )*MRC_IN_USD/30 | BW In GBps= Mitigation BW /1000000000 | Need Source field confirmation for Mitigation BW?
+R020: B5.3 | KRI02 | Active in Network, Cancelled in Ordering |  | Revenue Impact & capex | If ageing > 90 days then Impact= MRC_USD/30 | BW In GBps= Mitigation BW /1000000000
+R021: B5.4 | KRI04 | Approval based Profiles- Unidentified Service status, due to Exception id (for circuit id with prefix E0) | Circuit id with prefix E0
+R022: B5.5 | NON-KRI02 | Unidentified Service status due to other product circuit id updated | If Service type as 'MSS, MSSTCL, Managed Security services' |  |  |  | Keep these managed services in config table\n'MANAGED SECURITY SERVICES', 'MSS', 'MSS-VIZNET', 'TCL SERVIC', 'TCL SERVICE',’ Managed DDoS’
+R023: B5.6 | (Good Cases) | Active in Network & Ordering
+
+################################################################################
+SHEET: Data Model (Rows: 28, Cols: 6)
+################################################################################
+R001: Data Model - Staging & Processing Table Inventory
+R003: Data Process Stage | DataSet/Table Entity Name | Standard /Non Standard Table | Reuse/Rebuild | Load Type | Description
+R004: ETL Acquisition | CTRL_23_SOURCE_DATASET_DDOS | Non standard | To be rebuild | Truncate & load | Source data as is
+R005: ETL Acquisition | CTRL_23_SOURCE_DATASET_VDOM | Non standard | To be rebuild | Truncate & load | Source data as is
+R006: ETL Acquisition | CTRL_23_SOURCE_DATASET_CMDB | Non standard | To be rebuild | Truncate & load | Source data as is
+R007: ETL Acquisition | CTRL_23_SOURCE_DATASET_CKTRECON | Non standard | To be rebuild | Truncate & load | Source data as is
+R008: Pre-Execution | ETL_DATA_ACQUISITION | Standard | Reuse component | History with 6 months data | summary table with source counts
+R009: Pre-Execution | CTRL_23_FILTERED_DATASET_DDOS | Non standard | To be rebuild | History with 6 months data | data set with null key, duplicate records)
+R010: Pre-Execution | CTRL_23_FILTERED_DATASET_VDOM | Non standard | To be rebuild | History with 6 months data | data set with null key, duplicate records)
+R011: Pre-Execution | CTRL_23_FILTERED_DATASET_CMDB | Non standard | To be rebuild | History with 6 months data | data set with null key, duplicate records)
+R012: Pre-Execution | CTRL_23_FILTERED_DATASET_DDOS | Non standard | To be rebuild | History with 6 months data | data set with null key, duplicate records)
+R013: Pre-Execution | CTRL_23_FILTER_SUMMARY | Standard | Reuse component | History with 6 months data | A summary table
+R014: Post-Execution | CTRL_23_BALANCE_DATASET_VDOM | Non standard | To be rebuild | Truncate & load | balance dataset after filtering null key, duplicate records)
+R015: Post-Execution | CTRL_23_BALANCE_DATASET_DDOS | Non standard | To be rebuild | Truncate & load | balance dataset after filtering null key, duplicate records)
+R016: Post-Execution | CTRL_23_WORKING_DATASET_RL | Standard with control specific attributes. | To be rebuild | Truncate & load | Detailed reconciled data with YY,YN,NY bucket
+R017: Post-Execution | CTRL_23_BALANCE_SUMMARY | Standard | Reuse component | History with 6 months data | summary table with YY,YN,NY records count
+R018: Post-Execution | CTRL_23_WORKING_DATASET_KL | Standard with control specific attributes. | Reuse (but work required for control specific attributes) | truncate & load | A outcome after KRI rule.\nCTRL_13_WORKING_DATASET_RL is input to this data.
+R019: Post-Execution | CTRL_23_WORK_ITEM_CURRENT_RUN | Standard with control specific attributes. | Reuse (but work required for control specific attributes) | truncate & load | KRI/Non KRI KRI final outcome
+R020: Post-Execution | CTRL_23_NON_KRI_SUMMARY | Standard | Reuse component | History with 6 months data | summary table with counts
+R021: Post-Execution | CTRL_23_NON_KRI_DETAILS | Standard with control specific attributes. | Reuse (but work required for control specific attributes) | Truncate & load | Non KRI details
+R022: Post-Execution | CTRL_23_KRI_SUMMARY | Standard | Reuse component | History with 6 months data | summary table with exception counts
+R023: Post-Execution | CTRL_23_CASE_SUMMARY | Standard | Reuse component | History with 6 months data | summary table with case wise exception counts
+R024: Post-Execution | CTRL_23_WORK_ITEM | Standard with control specific attributes. | Reuse (but work required for control specific attributes) | History with 6 months data | detailed work item/records
+R025: Config | KRI_CONFIG | Standard | Reuse component |  | master table
+R026: Config | CTRL_CONFIG | Standard | Reuse component |  | master table
+R027: Config | BUCKET_CONFIG | Standard | Reuse component |  | master table
+R028: Config | RULE_CONFIG | Standard | Reuse component |  | master table
+
+################################################################################
+SHEET: Report Derivation Logic (Rows: 47, Cols: 5)
+################################################################################
+R001: Derivation Logic Behind Each Management Report
+R003: Reconciliation Summary Report - Attribute Derivation
+R004: Sl.No. | Attributes | Source fields | Tables | Remark
+R005: 1 | RECON remarks | kri_description | WorkItem_Current_run | For Good Cases:\nGet Details from B5.6 Good Cases Table
+R006: 2 | System | Derive:\nGroup by Source_System for each KRI & Description | WorkItem_Current_run
+R007: 3 | Profile count | Derive:\nGet Profile count group by source_system for each KRI & Description | WorkItem_Current_run
+R008: 4 | Unique circuit | Derive:\nGet Unique Circuit Id count group by source_system for each KRI & Description | WorkItem_Current_run
+R009: 5 | Impact | impact_value_system_in_usd | WorkItem_Current_run
+R010: 6 | Circuit id matched | Derive:\n1. Get all the unique circuits ids for respective remark/KRI and check in Billing Report.\n2. Get the Matched count | WorkItem_Current_run & dl_ra_order_report_daily | For Good Cases:\nGet Details from B5.6 Good Cases Table
+R011: 7 | Circuit id not matched | Derive:\n1. Get all the unique circuits ids for respective remark/KRI and check in Billing Report.\n2. Get the Non-Matched count | WorkItem_Current_run & dl_ra_order_report_daily | For Good Cases:\nGet Details from B5.6 Good Cases Table
+R014: SIGS (Billing Match) Report - Attribute Derivation
+R015: Sl.No. | Attributes | Source fields | Tables | Remark
+R016: 1 | SIGS remarks | Create these two static remarks:\n1. Found in Billing report\n2. Not found in Billing Report |  | This is mapped with Three-way Dashboard as \n1.  Found in Billing report -> Circuit Id Matched\n2. Not found in Billing Report -> Circuit Id Not Matched
+R017: 2 | source system | Derive:\n1. Get the Source_System details from Threeway dashboard for\n1. Cicuit Id Matched\n2. Circuit Id Not Matched | Threeway dashboard
+R018: 3 | Unique circuit id | Derive:\n1. Get the Unique circuit Id count from Threeway dashboard for\n1. Cicuit Id Matched\n2. Circuit Id Not Matched | Threeway dashboard
+R019: 4 | No of Profile | Derive:\n1. Get the Profile count from Threeway dashboard for\n1. Cicuit Id Matched\n2. Circuit Id Not Matched | Threeway dashboard
+R020: 5 | NRC_USD | Derive:\nAggregated NRC group by source and unique Circuit id\n\nSource Field:\ndiscounted_onetimecharge, standard_onetimecharge | dl_ra_order_report_daily | If discounted_onetimecharge is null then consider standard_onetimecharge
+R021: 6 | MRC_USD | Derive:\nAggregated MRC group by source and unique Circuit id\n\nSource Field:\nannual_recurring_charge | dl_ra_order_report_daily
+R022: 7 | Issue remark | Derive:\n1. If Found in Billing Then No Issue\n2. If Not Found In Billing Then Issue
+R025: Billing vs Network Report - Attribute Derivation
+R026: SNO | Column Name | Source Field | Table Name | Remark
+R027: 1 | Remarks-Billing vs Network | Derivation is given
+R028: 2 | System | Derivation is given
+R029: 3 | Profile count | Count (Profile Name)
+R030: 4 | CKt count | Count (Circuit_id)
+R031: 5 | Billing MRC in USD | MRC_USD | dl_ra_order_report_daily
+R032: 6 | Billing NRC in USD | NRC_USD | dl_ra_order_report_daily
+R033: 7 | % of ckt id | (System-wise count)/Total Count (Circuit_Id)
+R036: Service Type / Revenue Split Report - Attribute Derivation
+R037: SNO | Column Name | Source Field | Table Name | Remark
+R038: 1 | Service_Type | Derivation is given | qlik_report.dl_ra_order_report_daily
+R039: 2 | Sub_Service_Type | Derivation is given | qlik_report.dl_ra_order_report_daily
+R040: 3 | System | Derivation is given | qlik_report.dl_ra_order_report_daily
+R041: 4 | Unique_Ckt_ID | Distinct Count (c_circuitid) groub by system | qlik_report.dl_ra_order_report_daily
+R042: 5 | NRC_USD** | If discounted_onetimecharge is null then consider standard_onetimecharge | qlik_report.dl_ra_order_report_daily | Aggregated NRC to be shown against unique ckt id
+R043: 6 | MRC_USD** | annual_recurring_charge | qlik_report.dl_ra_order_report_daily | Aggregated MRC to be shown against unique ckt id
+R044: 7 | System NRC_% | Derive:\n(System-wise NRC)/Total NRC | qlik_report.dl_ra_order_report_daily
+R045: 8 | System MRC_% | Derive:\n(System-wise MRC)/Total MRC | qlik_report.dl_ra_order_report_daily
+R046: 9 | Service NRC % | Derive:\n(Sub-Service-wise NRC)/Total NRC | qlik_report.dl_ra_order_report_daily
+R047: 10 | Service MRC % | Derive:\n(Sub-Service-wise MRC)/Total MRC | qlik_report.dl_ra_order_report_daily
+
+################################################################################
+SHEET: Config Tables (Rows: 104, Cols: 1)
+################################################################################
+R001: Configuration & Exclusion Lists Referenced in Rules
+R003: Internal Profiles (VDOM) - Hostnames excluded by Rule R9
+R004: Hostname
+R005: CHN-vUTM-FW05
+R006: DEL-vUTM-FW01
+R007: DEL-vUTM-FW03
+R008: US-NYC-vUTM-FW04
+R009: CRSX-vUTM-FW03
+R010: SGP-vUTM-FW03
+R011: US-LAA-vUTM-FW03
+R012: SYD-vUTM-FW01
+R013: FFT-SIGS-FW04
+R014: PAR-SIGS-FW03
+R015: MUM-vUTM-FW03
+R016: CHN-vUTM-FW03
+R019: Managed Service Types - used in KRI/Non-KRI logic (B5.5)
+R020: Managed Services
+R021: MSS
+R022: MSSTCL
+R023: Managed Security Services
+R024: MSS-VIZNET
+R025: TCL SERVIC
+R026: TCL SERVICE
+R029: Test/Dummy IP Exclusion List - Rule R10 (CMDB)
+R030: IP
+R031: 1.1
+R032: 1.1.1.1
+R033: 0.0.0.1
+R034: 0.0.0.0
+R037: Internal / Test Customer Name Exclusion List
+R038: Customer Name
+R039: TCl_IT_Singapore
+R040: TCL_IT_Pune
+R041: TCL_IT_London
+R042: TCL_IT_Santaclara_(USA)
+R043: TCL_IT_Chennai
+R044: Network_Monitoring_Profile
+R045: TCL_IT_Mumbai
+R046: TCL_IT_Wall_(USA)
+R047: TCL_IT_Montreal_(Canada)
+R048: TCTSL_Dighi
+R049: TCTSL_Emerald_Pune
+R050: Demo_Test_PO
+R051: GSIP_UNTRUSTED_LHX
+R052: GSIP_UNTRUSTED_SVW
+R053: UCC_TEMP
+R054: GSIP_UNTRUSTED_1MH
+R055: GSIP_UNTRUSTED_L78
+R056: TCTSL_Mumbai_LVSB2
+R057: GSIP_UNTRUSTED_WV6
+R058: GSIP_UNTRUSTED_TTT
+R059: TCTSL_Mumbai_LVSB1
+R060: GSIP_UNTRUSTED_HKU
+R061: GSIP_UNTRUSTED_JN1
+R062: GSIP_UNTRUSTED_LAA
+R063: GSIP_UNTRUSTED_MTT
+R064: GSIP_UNTRUSTED_NW8
+R065: UCC_INSTACC_Singapore
+R066: UCC_GMX_Singapore
+R067: UCC_INSTACC_UK
+R068: UCC_GMX_Hyderabad
+R069: UCC_GMX_London
+R070: UCC_HCS_Singapore
+R071: UCC_GMX_Newyork
+R072: UCC_INSTACC_US
+R073: UCC_HCS_UK
+R074: UCC_Bangalore
+R075: Pearl_Test_MO
+R076: Pearl_Test_Carpet_Bombing
+R077: SDWAN_Chennai_Link1
+R078: TCL_IOT_104
+R079: IOT_TATA_Proj45
+R080: IOT_Tata_GSMC58
+R081: IOT_Tata_GSMC88
+R082: IoT_BU-I49
+R083: AS_4755_SILL_IPv6
+R084: Cisco Viptela -SD WAN- Test MO
+R085: Test Mo- Unnumbered GRE tunnel - OEM versa
+R086: Test Mo 2- Unnumbered GRE tunnel - OEM versa
+R087: Silver Peak Test- SDWAN -Parag
+R088: test_hdfc_bank_blr_proxy
+R089: test_hdfc_bank_chan_proxy
+R090: Nournet_GRE_Tunnel Testing
+R091: Pearl_Test_AS_Comm
+R092: PP_test
+R093: Pearl_Test_IPv6
+R094: pearl_test_vlan_poc
+R095: Pearl_Test_CDN
+R096: Pearl_Test_Waap
+R097: Test_Customer
+R098: pearl_NAT_Test_MO
+R099: pearl_NAT_Test_MO2
+R100: MitigationOnlyTesting
+R101: CDN_DNS
+R102: CDN_1
+R103: CDN_2
+R104: CDN_TATASKY

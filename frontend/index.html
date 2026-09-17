@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="HLA Project - Excel File Upload Tool" />
+    <title>HLA Project | Excel Upload</title>
+  </head>
+  <body>
+    <div id="error-overlay" style="display:none;color:#fee2e2;background:#991b1b;padding:24px;font-family:Consolas,monospace;font-size:15px;white-space:pre-wrap;z-index:999999;position:fixed;inset:0;overflow:auto;"></div>
+    <script>
+      window.addEventListener('error', function(e) {
+        var el = document.getElementById('error-overlay');
+        if (el) {
+          el.style.display = 'block';
+          el.textContent += '\n[UNCAUGHT ERROR]: ' + (e.error ? (e.error.stack || e.error.message) : (e.message || e)) + '\nSource: ' + e.filename + ':' + e.lineno + ':' + e.colno;
+        }
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var el = document.getElementById('error-overlay');
+        if (el) {
+          el.style.display = 'block';
+          el.textContent += '\n[UNHANDLED REJECTION]: ' + (e.reason ? (e.reason.stack || e.reason.message || e.reason) : e);
+        }
+      });
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,31 @@
+# Environments and Secrets (Never commit secrets)
+.env
+*.env
+.env.*
+!*.env.example
+*.kdb
+*.vault
+credentials.json
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+*.sqlite3
+uploads/
+*.log
+app.log
+
+# Node
+node_modules/
+frontend/dist/
+frontend/node_modules/
+

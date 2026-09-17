@@ -1187,17 +1187,10 @@ def generate_transformation_sql(
 --   Configuration values discovered: {hla_summary.get('entities_discovered', {}).get('configuration_values_count', 0)}
 --
 -- Cross-sheet references resolved: {hla_summary.get('cross_sheet_references_resolved_count', 0)}
---   [✓] Source Systems -> Input Streams (I1-I4: VDOM, DDOS, CMDB, Circuit Reco)
---   [✓] Business Rules -> Config Tables (Rule R9 -> Internal Profiles: 12 hostnames)
---   [✓] Business Rules -> Config Tables (Rule R10 -> Test/Dummy IPs: 4 patterns)
---   [✓] Buckets & KRI Logic -> Config Tables (Bucket B5.5 -> Managed Services: 6 types)
---   [✓] Business Rules -> Data Model Stages (25 stage tables aligned)
---   [✓] Report Derivation Logic -> Target Data Model & Orders (4 management reports)
+--   [✓] Source feeds, business rules, and target mapping references resolved dynamically
 --
 -- Unresolved references: {hla_summary.get('unresolved_references_count', 0)}
---   [!] 22 Target columns without physical table/column binding in Sheet 2 (Attribute Mapping)
---   [!] 10 Derived formula expressions pending physical upstream bindings
---   [!] 6 Upstream source tables missing from connected PostgreSQL database
+--   [!] Attribute mappings and formula expressions pending physical upstream bindings evaluated
 -- ============================================================================
 --
 -- ============================================================================
@@ -1585,8 +1578,10 @@ FROM {prefix}{recon_matches_tbl} m;""")
             "is_unresolved": is_unres
         })
 
+    actual_bal_cols = known_columns_map.get(bal_table.lower()) if known_columns_map else None
+
     for rep_tbl, cols in report_groups.items():
-        actual_rep_cols = known_columns_map.get(rep_tbl.lower())
+        actual_rep_cols = known_columns_map.get(rep_tbl.lower()) if known_columns_map else None
         col_names = []
         select_exprs = []
         for c in cols:
@@ -1597,19 +1592,38 @@ FROM {prefix}{recon_matches_tbl} m;""")
 
             col_names.append(col_ident)
             logic_clean = c.get("logic", "")
-            src_f = c.get("source_field", "")
-            src_t = c.get("source_table", "")
+            src_f = (c.get("source_field") or "").strip()
+            src_t = (c.get("source_table") or "").strip()
             row_num = c.get("row_number", "")
             sno = c.get("sno", "")
 
-            # Check if this is an explicit executable SQL expression (CASE, COALESCE, etc.)
+            # Dynamically identify if src_f is a stream/system label rather than an actual source column
+            known_stream_names = {
+                _sanitize_ident(s.get("source_table", "")).lower() for s in (sources or [])
+            } | {
+                _sanitize_ident(s.get("source_system", "")).lower() for s in (sources or [])
+            } | {"derived", "none", "unspecified", "direct", ""}
+
+            # Check if there is a verified physical column matching on balanced dataset table 'b'
+            matched_bal_col = None
+            if actual_bal_cols is not None:
+                if src_f and _sanitize_ident(src_f).lower() in actual_bal_cols:
+                    matched_bal_col = _sanitize_ident(src_f)
+                elif col_ident.lower() in actual_bal_cols:
+                    matched_bal_col = col_ident
+            else:
+                if src_f and _sanitize_ident(src_f).lower() not in known_stream_names:
+                    # Guard against common stream/source name keywords
+                    if not any(k in src_f.lower() for k in ["vutm", "cmdb", "circuit", "sfdc", "ddos", "pearl", "qlik"]):
+                        matched_bal_col = _sanitize_ident(src_f)
+
             if c["type"] == "Derived" and any(logic_clean.lower().startswith(kw) for kw in ["case", "coalesce", "cast"]):
                 select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Derived Logic */\n    {logic_clean} AS {col_ident}")
-            elif c["type"] == "Direct" and src_f and src_f.lower() not in (col_ident.lower(), "vutm/doos", "cmdb", "circuit reco", "sfdc", "derived", "none", ""):
-                # If there's an exact physical column name from source
-                select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Direct Field */\n    b.{_sanitize_ident(src_f)} AS {col_ident}")
+            elif c["type"] == "Direct" and matched_bal_col:
+                # Exact verified column exists on table b
+                select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Direct Field */\n    b.{matched_bal_col} AS {col_ident}")
             else:
-                # The HLA specification defines the logical stream/requirement but has not bound a verified physical column
+                # Unbound logical stream / missing physical binding
                 stream_hint = src_f or src_t or "Unspecified"
                 select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Stream: '{stream_hint}' | UNRESOLVED HLA DEPENDENCY: Missing physical table/column binding in Sheet 2 */\n    NULL AS {col_ident}")
 
@@ -2660,8 +2674,7 @@ _CONSTRAINT_STARTERS = (
 # these incomplete fragments must be rejected before execution.
 _INCOMPLETE_PATTERNS = re.compile(
     r'(?:GENERATED\s+BY\s*;|GENERATED\s+ALWAYS\s*;|GENERATED\s+BY\s+DEFAULT\s*;'
-    r'|\bDEFAULT\s*;|\bVARCHAR\s*;|\bNUMERIC\s*;|\bTIMESTAMP\s*;'
-    r'|\bINTEGER\s*;|\bBIGINT\s*;|\bTEXT\s*;)',
+    r'|\bDEFAULT\s*;|\bVARCHAR\s*;|\bNUMERIC\s*;)',
     re.IGNORECASE,
 )
 
@@ -3095,14 +3108,20 @@ def _build_alter_statements(
             ))
             continue
 
+        # For ALTER on existing tables, NOT NULL without DEFAULT will fail on tables with data.
+        # Strip NOT NULL if no DEFAULT is specified so ALTER succeeds safely.
+        alter_def = full_def
+        if re.search(r'\bNOT\s+NULL\b', alter_def, flags=re.IGNORECASE) and not re.search(r'\bDEFAULT\b', alter_def, flags=re.IGNORECASE):
+            alter_def = re.sub(r'\bNOT\s+NULL\b', '', alter_def, flags=re.IGNORECASE).strip()
+
         if is_pg:
             stmt = (
                 f"ALTER TABLE {prefix}{table_bare}"
-                f" ADD COLUMN IF NOT EXISTS {cname} {full_def};"
+                f" ADD COLUMN IF NOT EXISTS {cname} {alter_def};"
             )
         elif is_mssql:
             # Strip GENERATED/IDENTITY for MSSQL (different syntax)
-            mssql_def = re.split(r'\bGENERATED\b', full_def, flags=re.IGNORECASE)[0].strip()
+            mssql_def = re.split(r'\bGENERATED\b', alter_def, flags=re.IGNORECASE)[0].strip()
             stmt = (
                 f"IF NOT EXISTS ("
                 f"SELECT 1 FROM sys.columns"
@@ -3111,7 +3130,7 @@ def _build_alter_statements(
                 f") ALTER TABLE {prefix}{table_bare} ADD {cname} {mssql_def};"
             )
         elif is_mysql:
-            mysql_def = re.split(r'\bGENERATED\b', full_def, flags=re.IGNORECASE)[0].strip()
+            mysql_def = re.split(r'\bGENERATED\b', alter_def, flags=re.IGNORECASE)[0].strip()
             stmt = (
                 f"ALTER TABLE {prefix}{table_bare}"
                 f" ADD COLUMN IF NOT EXISTS {cname} {mysql_def};"
@@ -3119,7 +3138,7 @@ def _build_alter_statements(
         else:
             stmt = (
                 f"ALTER TABLE {prefix}{table_bare}"
-                f" ADD COLUMN IF NOT EXISTS {cname} {full_def};"
+                f" ADD COLUMN IF NOT EXISTS {cname} {alter_def};"
             )
 
         # Validate completeness before adding to results

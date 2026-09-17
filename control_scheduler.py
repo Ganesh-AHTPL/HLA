@@ -541,7 +541,11 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
             _log("QUALITY GATE PASSED: All upstream source feeds verified present and fresh with latest date data.")
 
             # Resolve Target Database Configuration for specific environment (prod/dev)
-            target_schema_name = co.get("target_schema") or f"ra_ctrl.ctrl_{co.get('control_digits', '23')}"
+            ctrl_digits = co.get("control_digits")
+            if not ctrl_digits:
+                m_dig = re.search(r'\d+', str(co.get("identification", {}).get("control_number") or ""))
+                ctrl_digits = m_dig.group(0) if m_dig else str(doc.id or "01")
+            target_schema_name = co.get("target_schema") or f"ra_ctrl.ctrl_{ctrl_digits}"
             if isinstance(target_schema_name, dict):
                 target_schema_name = target_schema_name.get("schema_name", "ra_ctrl")
 

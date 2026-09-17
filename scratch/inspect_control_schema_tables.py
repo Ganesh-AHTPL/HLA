@@ -1,9 +1,10 @@
+import sys
 from sqlalchemy import create_engine, inspect, text
 
-url = 'postgresql://hla_user:ganesh@13.127.198.137:5432/hla'
+url = sys.argv[2] if len(sys.argv) > 2 else 'postgresql://hla_user:ganesh@13.127.198.137:5432/hla'
 eng = create_engine(url, connect_args={'connect_timeout': 10})
 insp = inspect(eng)
-schema = 'ra_ctrl.ctrl_23'
+schema = sys.argv[1] if len(sys.argv) > 1 else 'ra_ctrl'
 
 tables = insp.get_table_names(schema=schema)
 print(f"Total tables in {schema}: {len(tables)}")

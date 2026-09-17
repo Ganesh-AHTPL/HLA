@@ -1,8 +1,14 @@
 import openpyxl
 import json
 import os
+import sys
+import glob
 
-EXCEL_PATH = r"uploads/projects/67/Control23_Source_Logic_2.xlsx"
+if len(sys.argv) > 1:
+    EXCEL_PATH = sys.argv[1]
+else:
+    found = glob.glob("uploads/projects/*/*.xlsx")
+    EXCEL_PATH = found[0] if found else "uploads/sample.xlsx"
 
 wb = openpyxl.load_workbook(EXCEL_PATH, data_only=False)
 wb_data = openpyxl.load_workbook(EXCEL_PATH, data_only=True)

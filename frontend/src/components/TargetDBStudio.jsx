@@ -58,6 +58,36 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
   const [scanningSource, setScanningSource] = useState(false)
   const [deletingDoc, setDeletingDoc] = useState(false)
 
+  // Schema Migration & Table Repair State
+  const [showMigrationModal, setShowMigrationModal] = useState(false)
+  const [migrationRunning, setMigrationRunning] = useState(false)
+  const [migrationAction, setMigrationAction] = useState('') // 'preview' | 'repair'
+  const [migrationReport, setMigrationReport] = useState(null)
+  const [migrationScope, setMigrationScope] = useState('all') // 'all' | 'target' | 'source'
+
+  const handleRunSchemaMigration = async (action = 'preview') => {
+    setMigrationRunning(true)
+    setMigrationAction(action)
+    try {
+      const endpoint = action === 'preview' ? '/api/schema-migrations/preview' : '/api/schema-migrations/repair'
+      const payload = {
+        project_id: projectId,
+        environment: activeEnv,
+        scope: migrationScope,
+        schema_name: targetForm.schema_name || undefined,
+      }
+      const res = await api.post(endpoint, payload)
+      setMigrationReport(res.data)
+    } catch (err) {
+      setMigrationReport({
+        success: false,
+        error: err.response?.data?.error || `Failed to run schema migration (${action}).`
+      })
+    } finally {
+      setMigrationRunning(false)
+    }
+  }
+
   const handleDeleteDoc = async (docIdToDelete, docName) => {
     if (!docIdToDelete) return
     const displayName = docName || `Document #${docIdToDelete}`
@@ -1168,23 +1198,54 @@ schema = target_prod`
 
               {/* Action Buttons */}
               {!isViewer ? (
-                <div className="deploy-btn-group">
-                  <button
-                    className="btn-validate"
-                    onClick={() => handleDeployAction('validate')}
-                    disabled={deploying || (scanResult && scanResult.tables_missing_count > 0)}
-                    title={scanResult && scanResult.tables_missing_count > 0 ? "Blocked: Upstream source tables not found in source database" : "Test DDL syntax in rollback transaction"}
-                  >
-                    <span>🧪</span> {deploying && deployAction === 'validate' ? 'Validating…' : 'Validate & Dry-Run'}
-                  </button>
+                <div>
+                  <div className="deploy-btn-group">
+                    <button
+                      className="btn-validate"
+                      onClick={() => handleDeployAction('validate')}
+                      disabled={deploying || (scanResult && scanResult.tables_missing_count > 0)}
+                      title={scanResult && scanResult.tables_missing_count > 0 ? "Blocked: Upstream source tables not found in source database" : "Test DDL syntax in rollback transaction"}
+                    >
+                      <span>🧪</span> {deploying && deployAction === 'validate' ? 'Validating…' : 'Validate & Dry-Run'}
+                    </button>
+
+                    <button
+                      className={`btn-deploy-live ${activeEnv === 'prod' ? 'prod' : 'dev'}`}
+                      onClick={() => handleDeployAction('deploy')}
+                      disabled={deploying || (scanResult && scanResult.tables_missing_count > 0)}
+                      title={scanResult && scanResult.tables_missing_count > 0 ? "Blocked: Upstream source tables not found in source database" : "Deploy tables into target database"}
+                    >
+                      <span>🚀</span> {deploying && deployAction === 'deploy' ? 'Deploying Tables…' : 'Deploy to Target'}
+                    </button>
+                  </div>
 
                   <button
-                    className={`btn-deploy-live ${activeEnv === 'prod' ? 'prod' : 'dev'}`}
-                    onClick={() => handleDeployAction('deploy')}
-                    disabled={deploying || (scanResult && scanResult.tables_missing_count > 0)}
-                    title={scanResult && scanResult.tables_missing_count > 0 ? "Blocked: Upstream source tables not found in source database" : "Deploy tables into target database"}
+                    type="button"
+                    onClick={() => {
+                      setShowMigrationModal(true)
+                      handleRunSchemaMigration('preview')
+                    }}
+                    style={{
+                      width: '100%',
+                      marginTop: '0.55rem',
+                      padding: '0.45rem 0.8rem',
+                      background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(168, 85, 247, 0.15) 100%)',
+                      border: '1px solid rgba(139, 92, 246, 0.4)',
+                      borderRadius: '6px',
+                      color: '#c4b5fd',
+                      fontWeight: 700,
+                      fontSize: '0.78rem',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '0.45rem',
+                      transition: 'all 0.2s ease',
+                      boxShadow: '0 2px 6px rgba(0,0,0,0.2)'
+                    }}
+                    title="Discover generated tables, remove unwanted generic columns, and rebuild tables with correct column order and zero data loss"
                   >
-                    <span>🚀</span> {deploying && deployAction === 'deploy' ? 'Deploying Tables…' : 'Deploy to Target'}
+                    <span>🛡️</span> Validate & Repair Generated Tables
                   </button>
                 </div>
               ) : (
@@ -1901,6 +1962,235 @@ schema = target_prod`
                 </div>
               </form>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Schema Migration & Table Repair Modal */}
+      {showMigrationModal && (
+        <div className="modal-backdrop" onClick={() => setShowMigrationModal(false)}>
+          <div
+            className="schema-migration-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <span style={{ fontSize: '1.5rem', lineHeight: 1 }}>🛡️</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1.15rem', fontWeight: 800, color: '#f8fafc', letterSpacing: '-0.01em' }}>
+                    Schema Migration &amp; Table Repair Engine
+                  </h3>
+                  <p style={{ margin: '0.2rem 0 0', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                    Discovers generated tables, removes unwanted generic columns, and rebuilds column ordering with zero data loss.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn-close-modal"
+                onClick={() => setShowMigrationModal(false)}
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="modal-body">
+              {/* Migration Scope & Actions Toolbar */}
+              <div className="migration-scope-toolbar">
+                <div className="migration-scope-left">
+                  <span className="migration-scope-label">Scope:</span>
+                  <select
+                    className="migration-scope-select"
+                    value={migrationScope}
+                    onChange={(e) => setMigrationScope(e.target.value)}
+                  >
+                    <option value="all">All Connected Databases (Local + Target)</option>
+                    <option value="target">Target Database Only ({activeEnv.toUpperCase()})</option>
+                    <option value="source">Local Source / Core DB Only</option>
+                  </select>
+                </div>
+
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button
+                    type="button"
+                    className="btn-validate"
+                    disabled={migrationRunning}
+                    onClick={() => handleRunSchemaMigration('preview')}
+                    style={{ padding: '0.42rem 0.9rem', fontSize: '0.80rem' }}
+                  >
+                    {migrationRunning && migrationAction === 'preview' ? 'Inspecting…' : '🔍 Dry-Run Preview'}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn-deploy-live dev"
+                    disabled={migrationRunning}
+                    onClick={() => handleRunSchemaMigration('repair')}
+                    style={{ padding: '0.42rem 0.9rem', fontSize: '0.80rem' }}
+                  >
+                    {migrationRunning && migrationAction === 'repair' ? 'Rebuilding Tables…' : '⚡ Execute Live Repair'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Standard Envelope Enforced Banner */}
+              <div style={{ background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)', padding: '0.75rem 1rem', borderRadius: '8px', fontSize: '0.78rem', color: '#bae6fd', lineHeight: 1.55 }}>
+                <strong style={{ color: '#38bdf8' }}>HLA Standard Envelope Enforced:</strong>
+                <span style={{ marginLeft: '0.35rem' }}>
+                  <strong>First:</strong> <code>ctrl_id, exec_seq, execution_date, execution_schedule</code> → <strong>Middle:</strong> Business columns → <strong>Last:</strong> <code>create_dtm, update_dtm, updated_by, processing_date</code>.
+                  Unwanted generic columns (<code>id, batch_id, execution_cycle_date, record_status, source_reference, kri_flag</code>) are safely removed.
+                </span>
+              </div>
+
+              {/* Migration Report Results */}
+              {migrationReport ? (
+                <div>
+                  {migrationReport.error && (
+                    <div style={{ background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.35)', color: '#fca5a5', padding: '0.75rem 1rem', borderRadius: '8px', marginBottom: '1rem', fontSize: '0.82rem' }}>
+                      ❌ <strong>Error:</strong> {migrationReport.error}
+                    </div>
+                  )}
+
+                  {/* Summary Metric Cards */}
+                  {(() => {
+                    const reports = migrationReport.reports || (migrationReport.report ? [migrationReport.report] : [])
+                    let totalInspected = 0
+                    let totalMigrated = 0
+                    let totalSkipped = 0
+                    let totalFailed = 0
+                    let totalRows = 0
+
+                    reports.forEach((r) => {
+                      totalInspected += r.total_tables_inspected || 0
+                      totalMigrated += r.tables_migrated || 0
+                      totalSkipped += r.tables_skipped || 0
+                      totalFailed += r.tables_failed || 0
+                      totalRows += r.total_rows_preserved || 0
+                    })
+
+                    return (
+                      <div>
+                        <div className="migration-stats-grid" style={{ marginBottom: '1.2rem' }}>
+                          <div className="migration-stat-card">
+                            <div className="migration-stat-title">Tables Inspected</div>
+                            <div className="migration-stat-val" style={{ color: '#f8fafc' }}>{totalInspected}</div>
+                          </div>
+                          <div className="migration-stat-card">
+                            <div className="migration-stat-title">Needs Migration / Migrated</div>
+                            <div className="migration-stat-val" style={{ color: totalMigrated > 0 ? '#38bdf8' : '#86efac' }}>{totalMigrated}</div>
+                          </div>
+                          <div className="migration-stat-card">
+                            <div className="migration-stat-title">Compliant / Preserved</div>
+                            <div className="migration-stat-val" style={{ color: '#86efac' }}>{totalSkipped}</div>
+                          </div>
+                          <div className="migration-stat-card">
+                            <div className="migration-stat-title">Rows Preserved</div>
+                            <div className="migration-stat-val" style={{ color: '#c084fc' }}>{totalRows.toLocaleString()}</div>
+                          </div>
+                        </div>
+
+                        {/* Detailed Reports Per Database */}
+                        {reports.map((rep, rIdx) => (
+                          <div key={rIdx} className="migration-db-card" style={{ marginBottom: '1.2rem' }}>
+                            <div className="migration-db-header">
+                              <span>🗄️ {rep.database_label || 'Database'} ({rep.total_tables_inspected} tables)</span>
+                              <span style={{ fontSize: '0.72rem', color: rep.dry_run ? '#fbbf24' : '#86efac', background: 'rgba(0,0,0,0.35)', padding: '3px 10px', borderRadius: '4px', fontWeight: 700 }}>
+                                {rep.dry_run ? 'DRY-RUN PREVIEW' : 'LIVE MIGRATION EXECUTED'}
+                              </span>
+                            </div>
+
+                            <div style={{ padding: '0.85rem' }}>
+                              {(rep.details || []).length === 0 ? (
+                                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontStyle: 'italic', padding: '0.6rem' }}>
+                                  No generated tables found in configured schemas.
+                                </div>
+                              ) : (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                                  {(rep.details || []).map((tDetail, tIdx) => {
+                                    const isMigrated = tDetail.status === 'MIGRATED'
+                                    const isPlanned = tDetail.status === 'PLANNED'
+                                    const isSkipped = tDetail.status === 'SKIPPED'
+                                    const isFailed = tDetail.status === 'FAILED'
+
+                                    return (
+                                      <div
+                                        key={tIdx}
+                                        className={`migration-table-item ${isFailed ? 'failed' : isMigrated ? 'migrated' : isPlanned ? 'needs-rebuild' : 'conforms'}`}
+                                      >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.25rem' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+                                            <code style={{ fontWeight: 700, color: '#f1f5f9', fontSize: '0.84rem' }}>
+                                              {tDetail.schema}.{tDetail.table}
+                                            </code>
+                                            <span style={{ color: 'var(--text-muted)', fontSize: '0.74rem' }}>
+                                              ({(tDetail.rows_preserved || 0).toLocaleString()} rows)
+                                            </span>
+                                          </div>
+
+                                          <span
+                                            className={`migration-badge ${isFailed ? 'failed' : isMigrated ? 'migrated' : isPlanned ? 'planned' : 'conforms'}`}
+                                          >
+                                            {isFailed ? '✕ FAILED' : isMigrated ? '✓ MIGRATED' : isPlanned ? '⚡ NEEDS REBUILD' : '✓ CONFORMS'}
+                                          </span>
+                                        </div>
+
+                                        {tDetail.columns_removed && tDetail.columns_removed.length > 0 && (
+                                          <div style={{ color: '#f87171', fontSize: '0.74rem', marginTop: '0.2rem' }}>
+                                            <strong>Removed Unwanted Generic Columns:</strong> <code>{tDetail.columns_removed.join(', ')}</code>
+                                          </div>
+                                        )}
+
+                                        {tDetail.error && (
+                                          <div style={{ color: '#f87171', fontSize: '0.74rem', marginTop: '0.2rem' }}>
+                                            <strong>Error:</strong> {tDetail.error}
+                                          </div>
+                                        )}
+
+                                        {tDetail.message && !tDetail.error && (
+                                          <div style={{ color: 'var(--text-muted)', fontSize: '0.73rem', marginTop: '0.15rem' }}>
+                                            {tDetail.message}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  })()}
+                </div>
+              ) : (
+                <div style={{ textAlign: 'center', padding: '2.5rem 1rem', color: 'var(--text-muted)', fontSize: '0.84rem' }}>
+                  Click <strong>"Dry-Run Preview"</strong> to inspect PostgreSQL tables and plan migrations safely, or <strong>"Execute Live Repair"</strong> to rebuild non-conforming tables with zero data loss.
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowMigrationModal(false)}
+              >
+                Close
+              </button>
+
+              <div style={{ display: 'flex', gap: '0.6rem' }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={migrationRunning}
+                  onClick={() => handleRunSchemaMigration('repair')}
+                >
+                  {migrationRunning && migrationAction === 'repair' ? 'Processing Migration…' : '⚡ Rebuild & Repair Tables (ACID Safe)'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

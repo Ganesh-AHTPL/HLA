@@ -404,139 +404,28 @@ def extract_control_number_query(message: str) -> str | None:
 
 def retrieve_authorized_hla_context(user: User, message: str, project_id: int = None, document_id: int = None) -> tuple[str, bool]:
     """
-    Queries authorized PostgreSQL data matching the user's question without executing arbitrary SQL.
+    Queries authorized document data matching the user's question without executing arbitrary SQL.
     Enforces RBAC before fetching and sanitizes all retrieved data.
     Returns (formatted_context_string, has_retrieved_data).
     """
-    context_blocks = []
-    has_retrieved_data = False
-    
-    # 1. Check if user is asking about a specific control
-    ctrl_ref = extract_control_number_query(message)
-    
-    # Gather candidate documents
-    docs_to_inspect = []
-    if document_id:
-        doc = db.session.get(Document, document_id)
-        if doc:
-            docs_to_inspect.append(doc)
-    elif project_id:
-        docs_to_inspect = Document.query.filter_by(project_id=project_id).all()
-    else:
-        # Fallback to recent documents
-        docs_to_inspect = Document.query.order_by(Document.id.desc()).limit(15).all()
+    try:
+        from backend.ai.nlu.intent_parser import IntentParser
+        from backend.ai.nlu.entity_extractor import EntityExtractor
+        from backend.ai.context.retrieval import HLARetrievalEngine
 
-    # Search for matching control in documents
-    matched_doc = None
-    if ctrl_ref:
-        for d in docs_to_inspect:
-            if not d.analysis_data:
-                continue
-            ctrl_ov = d.analysis_data.get("control_overview", {})
-            c_num = str(ctrl_ov.get("identification", {}).get("control_number", "")).strip()
-            # Try matching 'Control 6' vs '6' or exact string
-            c_num_clean = re.sub(r"^(?:control|ctrl)\s*#?\s*", "", c_num, flags=re.IGNORECASE).strip()
-            if c_num and (ctrl_ref.lower() == c_num.lower() or ctrl_ref.lower() == c_num_clean.lower()):
-                matched_doc = d
-                break
+        intent, _ = IntentParser.parse_intent(message)
+        entities = EntityExtractor.extract_entities(message)
 
-    # If a specific control matched, retrieve its factual profile
-    if matched_doc and matched_doc.analysis_data:
-        has_retrieved_data = True
-        adata = sanitize_data_payload(matched_doc.analysis_data)
-        ctrl_ident = adata.get("control_overview", {}).get("identification", {})
-        
-        c_title = ctrl_ident.get("control_name") or matched_doc.original_name
-        c_num = ctrl_ident.get("control_number") or ctrl_ref
-        c_freq = ctrl_ident.get("frequency", "Not specified")
-        
-        # Latest execution runs
-        runs = ControlRunHistory.query.filter(
-            db.or_(
-                ControlRunHistory.document_id == matched_doc.id,
-                ControlRunHistory.control_number.ilike(f"%{ctrl_ref}%")
-            )
-        ).order_by(ControlRunHistory.started_at.desc()).limit(3).all()
-        
-        # Schedule configuration
-        schedules = ControlSchedule.query.filter_by(document_id=matched_doc.id).all()
-        
-        block = [
-            f"CONTROL PROFILE: Control {c_num} - {c_title}",
-            f"DOCUMENT: {matched_doc.original_name} (ID: {matched_doc.id})",
-            f"FREQUENCY: {c_freq}",
-        ]
-        
-        if schedules:
-            sched = schedules[0]
-            block.append(f"SCHEDULE TYPE: {sched.schedule_type} (Cron: {sched.cron_expression or 'None'}, Active: {sched.is_active})")
-            block.append(f"LAST SCHEDULE RUN STATUS: {sched.last_run_status or 'Never Run'}")
-            block.append(f"HOSTNAME: {sched.hostname or 'Not Configured'}")
-            
-        if runs:
-            block.append("\nRECENT EXECUTION RUNS:")
-            for r in runs:
-                r_sanitized = sanitize_data_payload(r.to_dict())
-                block.append(
-                    f"  • Run ID #{r.id} [{r.environment.upper()}]: Status={r.status}, "
-                    f"Started={r.started_at.isoformat() if r.started_at else 'Unknown'}, "
-                    f"Duration={r.duration_seconds}s, "
-                    f"Tables Checked={r.tables_checked_count}, Found={r.tables_found_count}, Missing={r.tables_missing_count}. "
-                    f"Summary: {r.summary_message or 'No summary message'}"
-                )
-                if r.execution_log:
-                    # Provide last 500 chars of execution log for failure diagnosis
-                    log_snippet = r.execution_log[-500:].strip()
-                    block.append(f"    Execution Log Tail: {log_snippet}")
-        else:
-            block.append("RECENT EXECUTION RUNS: No execution runs recorded yet for this control.")
+        return HLARetrievalEngine.retrieve_context(
+            intent=intent,
+            entities=entities,
+            project_id=project_id,
+            document_id=document_id
+        )
+    except Exception as e:
+        logger.error(f"[AI] Error retrieving authorized context: {e}")
+        return "", False
 
-        # Business rules
-        rules = adata.get("rules", [])
-        if rules and isinstance(rules, list):
-            block.append(f"\nHLA BUSINESS RULES ({len(rules)} defined):")
-            for r in rules[:6]:
-                if isinstance(r, dict):
-                    block.append(f"  • {r.get('rule_id', 'Rule')}: {r.get('rule_name', '')} - {r.get('description', '')}")
-
-        # Data sources / tables
-        sources = adata.get("sources", [])
-        if sources and isinstance(sources, list):
-            block.append(f"\nSOURCE DATASETS & TABLES ({len(sources)} sources):")
-            for s in sources[:6]:
-                if isinstance(s, dict):
-                    block.append(f"  • Table: {s.get('source_table_name') or s.get('table_name', '')} (Schema: {s.get('schema_name', 'public')})")
-
-        # KRI results & tolerances
-        kri = adata.get("kri", {})
-        if kri:
-            block.append(f"\nKEY RISK INDICATORS (KRI): {json.dumps(kri)[:400]}")
-
-        context_blocks.append("\n".join(block))
-
-    # 2. Check if user is asking to summarize controls or project status
-    elif any(k in message.lower() for k in ["summarize", "list controls", "what controls", "project controls", "status"]):
-        if project_id:
-            proj = db.session.get(Project, project_id)
-            if proj:
-                has_retrieved_data = True
-                proj_docs = Document.query.filter_by(project_id=project_id).all()
-                block = [
-                    f"PROJECT SUMMARY: {proj.name}",
-                    f"DESCRIPTION: {proj.description or 'None'}",
-                    f"REGISTERED DOCUMENTS / CONTROLS ({len(proj_docs)} total):"
-                ]
-                for d in proj_docs:
-                    c_num = ""
-                    c_name = d.original_name
-                    if d.analysis_data:
-                        ident = d.analysis_data.get("control_overview", {}).get("identification", {})
-                        c_num = ident.get("control_number", "")
-                        c_name = ident.get("control_name") or d.original_name
-                    block.append(f"  • Document #{d.id}: {c_name} (Control Number: {c_num or 'N/A'}, Status: {d.status})")
-                context_blocks.append("\n".join(block))
-
-    return "\n\n".join(context_blocks), has_retrieved_data
 
 
 # ── LLM Chat Orchestrator ──────────────────────────────────────────────

@@ -4,22 +4,12 @@ Ensures zero violations of platform standards before any DDL is executed (RULE 1
 """
 
 import re
-from typing import List, Set
+from typing import List, Set, Optional
 from backend.core.result import ValidationResult
 from backend.core.constants import (
     FORBIDDEN_SYNTHETIC_COLUMN_PREFIXES,
     FORBIDDEN_AUTO_COLUMNS
 )
-
-# External source schemas that must NEVER be created as target tables (RULE 6, RULE 44)
-EXTERNAL_SOURCE_SCHEMAS: Set[str] = {
-    "cmdb",
-    "pearl",
-    "sfdc",
-    "qlik_report",
-    "ra",
-    "reports"
-}
 
 
 class SchemaValidator:
@@ -28,14 +18,16 @@ class SchemaValidator:
     """
 
     @classmethod
-    def validate_target_schema_name(cls, schema_name: str) -> ValidationResult:
+    def validate_target_schema_name(cls, schema_name: str, known_source_schemas: Optional[Set[str]] = None) -> ValidationResult:
         res = ValidationResult(is_valid=True)
         schema_clean = schema_name.strip().strip('"').lower()
 
-        if schema_clean in EXTERNAL_SOURCE_SCHEMAS:
-            res.add_error(
-                f"Invalid target schema '{schema_name}'. Cannot target external source schema (RULE 6, RULE 44)."
-            )
+        if known_source_schemas:
+            clean_sources = {s.strip().strip('"').lower() for s in known_source_schemas if s}
+            if schema_clean in clean_sources:
+                res.add_error(
+                    f"Invalid target schema '{schema_name}'. Cannot target external source schema (RULE 6, RULE 44)."
+                )
 
         if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_\.]*$', schema_clean):
             res.add_error(f"Target schema name '{schema_name}' contains illegal characters.")

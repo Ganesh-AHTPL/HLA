@@ -20,6 +20,7 @@ class PhysicalSourceTable:
     schema_name: str
     table_name: str
     source_system: str
+    source_id: str = ""
     columns: Dict[str, PhysicalSourceColumn] = field(default_factory=dict)
     exists_in_database: bool = False
 
@@ -30,10 +31,11 @@ class PhysicalSourceTable:
 
 @dataclass
 class LogicalSourceStream:
-    stream_name: str  # e.g. "VUTM/DOOS", "CMDB", "DDOS", "Circuit Reco", "SFDC", "Billing"
+    stream_name: str  # e.g. logical stream or table identifier
     source_system: str
     physical_schema: str
     physical_table: str
+    source_id: str = ""
     description: str = ""
     is_required: bool = True
     resolved_physical_table: Optional[PhysicalSourceTable] = None

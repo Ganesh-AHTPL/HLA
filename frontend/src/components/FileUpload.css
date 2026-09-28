@@ -22,7 +22,7 @@
 .viewer-notice-content h4 {
   font-size: 1.15rem;
   font-weight: 800;
-  color: #ffffff;
+  color: var(--text-primary);
   margin: 0 0 0.35rem 0;
 }
 
@@ -39,7 +39,7 @@
   width: 100%;
   min-height: 220px;
   background: var(--bg-surface-card);
-  border: 2px dashed rgba(255, 255, 255, 0.15);
+  border: 2px dashed var(--border-subtle);
   border-radius: 20px;
   padding: 2.5rem 1.75rem;
   display: flex;
@@ -100,7 +100,7 @@
 .dropzone-idle-content h3 {
   font-size: 1.35rem;
   font-weight: 800;
-  color: #ffffff;
+  color: var(--text-primary);
   margin: 0 0 0.4rem 0;
 }
 
@@ -145,8 +145,8 @@
 }
 
 .fmt-pill.max {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-subtle);
   color: var(--text-muted);
 }
 
@@ -182,7 +182,7 @@
 .file-name {
   font-size: 1.15rem;
   font-weight: 800;
-  color: #ffffff;
+  color: var(--text-primary);
   margin: 0.25rem 0 0.15rem 0;
 }
 
@@ -211,7 +211,7 @@
 
 .dropzone-uploading-content h4 {
   font-size: 1.15rem;
-  color: #ffffff;
+  color: var(--text-primary);
   margin: 0;
 }
 

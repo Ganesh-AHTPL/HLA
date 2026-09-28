@@ -167,7 +167,7 @@ export default function SMTPSettingsModal({ onClose, currentUser, defaultEmail }
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
             <span style={{ fontSize: '1.6rem' }}>📧</span>
             <div>
-              <h3 style={{ margin: 0, fontSize: '1.45rem', fontWeight: 800, color: '#ffffff' }}>
+              <h3 style={{ margin: 0, fontSize: '1.45rem', fontWeight: 800, color: 'var(--text-primary)' }}>
                 Automated Email Alerts & Test Center
               </h3>
               <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.96rem', color: 'var(--text-muted)' }}>
@@ -240,7 +240,7 @@ export default function SMTPSettingsModal({ onClose, currentUser, defaultEmail }
                     <span>{testResult.message}</span>
                   </div>
                   {testResult.delivery_mode && (
-                    <div style={{ marginTop: '0.35rem', fontSize: '0.94rem', color: '#cbd5e1' }}>
+                    <div style={{ marginTop: '0.35rem', fontSize: '0.94rem', color: 'var(--text-secondary)' }}>
                       Delivery Mode: <strong>{testResult.delivery_mode}</strong>
                     </div>
                   )}
@@ -266,7 +266,7 @@ export default function SMTPSettingsModal({ onClose, currentUser, defaultEmail }
             <div className="email-guide-box">
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem' }}>
                 <span style={{ fontSize: '1.25rem' }}>🔔</span>
-                <strong style={{ color: '#ffffff', fontSize: '1.02rem' }}>
+                <strong style={{ color: 'var(--text-primary)', fontSize: '1.02rem' }}>
                   How Automated Failure Alerts Work on Scheduled Runs:
                 </strong>
               </div>

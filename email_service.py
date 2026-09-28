@@ -1212,4 +1212,179 @@ HLA Studio"""
     }
 
 
+def send_user_welcome_setup_email(user, setup_link: str, expires_minutes: int = 1440) -> dict:
+    """
+    Sends an enterprise welcome email to newly created users with a secure password setup link.
+    If SMTP is configured, sends via live SMTP.
+    Otherwise, records the dispatch in EmailNotificationLog for simulated delivery.
+    """
+    target_email = getattr(user, "email", None)
+    if not target_email or not is_deliverable_email(target_email):
+        return {
+            "success": False,
+            "status": "INVALID_EMAIL",
+            "message": f"User '{getattr(user, 'username', 'unknown')}' does not have a valid deliverable email address configured.",
+            "error": "Deliverable email address required."
+        }
+
+    role_name = (user.assigned_role.name if getattr(user, 'assigned_role', None) else (getattr(user, 'role', 'Viewer') or 'Viewer')).upper()
+    subject = "🎉 Welcome to HLA Studio - Set Up Your Account Password"
+
+    hours = int(expires_minutes / 60) if expires_minutes >= 60 else expires_minutes
+    time_label = f"{hours} hours" if expires_minutes >= 60 else f"{expires_minutes} minutes"
+
+    body_text = f"""Hello {user.username},
+
+Welcome to HLA Studio Enterprise Data Architecture & Governance Platform!
+
+An administrator has provisioned an account for you:
+- Username: {user.username}
+- Corporate Email: {target_email}
+- Assigned Role: {role_name}
+
+To complete your setup and choose your account password, click the secure link below:
+{setup_link}
+
+This activation link is valid for {time_label} and can only be used once.
+
+Best regards,
+HLA Studio Security & Governance Team
+"""
+
+    body_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0a0e17; color: #f8fafc; margin: 0; padding: 24px; }}
+    .container {{ max-width: 580px; margin: 0 auto; background: #131b2e; border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
+    .header {{ background: linear-gradient(135deg, #1e40af, #2563eb); padding: 24px; color: #ffffff; text-align: center; }}
+    .header h1 {{ margin: 0; font-size: 22px; font-weight: 800; }}
+    .body {{ padding: 28px; font-size: 15px; line-height: 1.6; color: #cbd5e1; }}
+    .info-card {{ background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 16px; margin: 18px 0; }}
+    .info-row {{ display: flex; justify-content: space-between; margin-bottom: 8px; font-size: 14px; }}
+    .info-label {{ color: #94a3b8; font-weight: 600; }}
+    .info-val {{ color: #f8fafc; font-weight: 700; }}
+    .btn-wrap {{ text-align: center; margin: 24px 0; }}
+    .btn {{ display: inline-block; background: linear-gradient(135deg, #059669, #10b981); color: #ffffff !important; text-decoration: none; padding: 13px 28px; border-radius: 8px; font-weight: 700; font-size: 15px; box-shadow: 0 4px 12px rgba(16,185,129,0.3); }}
+    .link-box {{ background: #0a0e17; padding: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); word-break: break-all; font-family: monospace; font-size: 12px; color: #38bdf8; margin-top: 8px; }}
+    .footer {{ padding: 16px 24px; background: #0a0e17; border-top: 1px solid rgba(255,255,255,0.08); font-size: 12px; color: #64748b; text-align: center; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>HLA Studio • Enterprise Architecture</h1>
+    </div>
+    <div class="body">
+      <p style="font-size: 16px;">Hello <strong>{user.username}</strong>,</p>
+      <p>Welcome to <strong>HLA Studio</strong>. An enterprise account has been created for you.</p>
+
+      <div class="info-card">
+        <div class="info-row">
+          <span class="info-label">Username:</span>
+          <span class="info-val">{user.username}</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Assigned Role:</span>
+          <span class="info-val" style="color: #38bdf8;">{role_name}</span>
+        </div>
+        <div class="info-row" style="margin-bottom: 0;">
+          <span class="info-label">Status:</span>
+          <span class="info-val" style="color: #10b981;">{getattr(user, 'status', 'ACTIVE')}</span>
+        </div>
+      </div>
+
+      <p>Please click the button below to set your initial password and activate your account:</p>
+
+      <div class="btn-wrap">
+        <a href="{setup_link}" class="btn">🚀 Set Up My Password &amp; Log In</a>
+      </div>
+
+      <p style="font-size: 13px; color: #94a3b8;">Or copy and paste this secure link directly into your browser:</p>
+      <div class="link-box">{setup_link}</div>
+
+      <p style="margin-top: 20px; font-size: 13px; color: #94a3b8;">
+        ⏱️ This invitation link is valid for <strong>{time_label}</strong>.
+      </p>
+    </div>
+    <div class="footer">
+      HLA Studio Enterprise Governance • Automated Onboarding Dispatch
+    </div>
+  </div>
+</body>
+</html>
+"""
+    cfg = get_smtp_config()
+    smtp_ok = is_smtp_configured(cfg)
+    dispatch_status = "PENDING"
+    err_msg = None
+
+    if smtp_ok:
+        try:
+            host = cfg["host"]
+            port = cfg["port"]
+            user_auth = cfg["user"]
+            pwd = cfg["password"]
+            security = cfg["security"]
+            from_addr = cfg["from_email"]
+
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = from_addr
+            msg["To"] = target_email
+            msg.attach(MIMEText(body_text, "plain", "utf-8"))
+            msg.attach(MIMEText(body_html, "html", "utf-8"))
+
+            if security == "ssl":
+                with smtplib.SMTP_SSL(host, port, timeout=12) as server:
+                    if user_auth and pwd:
+                        server.login(user_auth, pwd)
+                    server.sendmail(from_addr, [target_email], msg.as_string())
+            else:
+                with smtplib.SMTP(host, port, timeout=12) as server:
+                    server.ehlo()
+                    if security != "none":
+                        server.starttls()
+                    if user_auth and pwd:
+                        server.login(user_auth, pwd)
+                    server.sendmail(from_addr, [target_email], msg.as_string())
+
+            dispatch_status = "SENT"
+            logger.info(f"[WELCOME EMAIL SENT] Sent onboarding email to {target_email} via {host}:{port}")
+        except Exception as e:
+            dispatch_status = "FAILED"
+            err_msg = str(e)
+            logger.error(f"[WELCOME EMAIL ERROR] Could not send welcome email via SMTP: {e}")
+    else:
+        dispatch_status = "SIMULATED"
+        logger.info(f"[WELCOME EMAIL SIMULATED] SMTP not configured. Setup link generated for {target_email}: {setup_link}")
+
+    try:
+        log_entry = EmailNotificationLog(
+            recipient_emails=target_email,
+            subject=subject,
+            body_text=body_text,
+            body_html=body_html,
+            status=dispatch_status,
+            error_message=err_msg,
+            sent_at=datetime.now(timezone.utc)
+        )
+        db.session.add(log_entry)
+        db.session.commit()
+    except Exception as log_e:
+        db.session.rollback()
+        logger.debug(f"Failed to log welcome email: {log_e}")
+
+    return {
+        "success": (dispatch_status == "SENT" or dispatch_status == "SIMULATED"),
+        "email": target_email,
+        "status": dispatch_status,
+        "setup_link": setup_link,
+        "error": err_msg
+    }
+
+
+
 

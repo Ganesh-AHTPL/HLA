@@ -14,8 +14,10 @@ export default function HlaAiAssistant({
     {
       role: 'assistant',
       content:
-        `Hello ${currentUser?.username || 'Architect'}! I am your **HLA Studio AI Assistant**, powered by local Ollama.\n\n` +
-        `I can help you inspect controls, analyze execution logs, review R1–R15 rules, and explain enterprise reconciliation architectures.\n\n` +
+        `Hello ${currentUser?.username || 'Architect'}! I am your **HLA Studio AI Assistant**.\n\n` +
+        `The uploaded document and active workspace are my authoritative ground truth. ` +
+        `I can help you inspect source datasets, analyze business rules, diagnose execution logs, ` +
+        `and explain generic architecture patterns.\n\n` +
         `How can I assist you today?`,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       context_used: false,
@@ -23,6 +25,11 @@ export default function HlaAiAssistant({
   ])
   const [inputMessage, setInputMessage] = useState('')
   const [loading, setLoading] = useState(false)
+  const [copiedIndex, setCopiedIndex] = useState(null)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [showSettings, setShowSettings] = useState(false)
+
+  // AI Provider Status
   const [aiStatus, setAiStatus] = useState({
     enabled: true,
     online: false,
@@ -30,14 +37,34 @@ export default function HlaAiAssistant({
     model_available: false,
     ready: false,
     status: 'STARTING',
+    active_provider: 'ollama',
+    is_cloud: false,
+    privacy_notice: 'Prompts and HLA data remain strictly local on your machine.',
     error: null,
     checking: true,
   })
-  const [copiedIndex, setCopiedIndex] = useState(null)
-  const [errorMsg, setErrorMsg] = useState('')
+
+  // Provider Settings State
+  const [settingsForm, setSettingsForm] = useState({
+    active_provider: 'ollama',
+    ollama_model: 'qwen3:latest',
+    ollama_base_url: 'http://127.0.0.1:11434',
+    api_provider_type: 'openai',
+    api_model: 'gpt-4o-mini',
+    api_key: '',
+    api_base_url: '',
+    has_api_key: false,
+  })
+
+  const [testingConnection, setTestingConnection] = useState(false)
+  const [testResult, setTestResult] = useState(null)
+  const [savingSettings, setSavingSettings] = useState(false)
+  const [saveSuccessMsg, setSaveSuccessMsg] = useState('')
+
   const messagesEndRef = useRef(null)
   const textareaRef = useRef(null)
 
+  // Fetch status and config
   const checkStatus = async () => {
     try {
       const res = await api.get('/api/ai/status')
@@ -49,6 +76,9 @@ export default function HlaAiAssistant({
         model_available: Boolean(data.model_available),
         ready: Boolean(data.ready),
         status: data.status || (data.ready ? 'READY' : 'OFFLINE'),
+        active_provider: data.active_provider || 'ollama',
+        is_cloud: Boolean(data.is_cloud),
+        privacy_notice: data.privacy_notice || '',
         error: data.error || null,
         checking: false,
       })
@@ -59,14 +89,32 @@ export default function HlaAiAssistant({
         online: false,
         ready: false,
         status: 'OFFLINE',
-        error: 'Ollama service is unreachable.',
+        error: 'AI service is unreachable.',
         checking: false,
       }))
       return 'OFFLINE'
     }
   }
 
-  // Fetch local Ollama engine status on open and automatically poll every 2 seconds until READY
+  const loadConfig = async () => {
+    try {
+      const res = await api.get('/api/ai/config')
+      const cfg = res.data || {}
+      setSettingsForm({
+        active_provider: cfg.active_provider || 'ollama',
+        ollama_model: cfg.ollama?.model || 'qwen3:latest',
+        ollama_base_url: cfg.ollama?.base_url || 'http://127.0.0.1:11434',
+        api_provider_type: cfg.api?.provider_type || 'openai',
+        api_model: cfg.api?.model || 'gpt-4o-mini',
+        api_key: '',
+        api_base_url: cfg.api?.base_url || '',
+        has_api_key: Boolean(cfg.api?.has_api_key),
+      })
+    } catch (err) {
+      console.warn('Failed to load AI configuration', err)
+    }
+  }
+
   useEffect(() => {
     if (!isOpen) return
 
@@ -74,73 +122,121 @@ export default function HlaAiAssistant({
       textareaRef.current.focus()
     }
 
-    // Immediate initial check
     checkStatus()
+    loadConfig()
 
-    // Setup polling: poll every 2 seconds until READY, stop after max 60 iterations (120 seconds)
     let pollCount = 0
-    const maxPolls = 60
+    const maxPolls = 30
     const intervalId = setInterval(async () => {
       pollCount += 1
       const currentStatus = await checkStatus()
       if (currentStatus === 'READY' || pollCount >= maxPolls) {
         clearInterval(intervalId)
       }
-    }, 2000)
+    }, 2500)
 
     return () => clearInterval(intervalId)
   }, [isOpen])
 
-  // Get status display badge and text
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  // Status badge display
   const getStatusDisplay = () => {
-    const status = aiStatus.status
+    const isCloud = aiStatus.is_cloud
     const model = aiStatus.model || 'qwen3'
+    const status = aiStatus.status
+
+    if (isCloud) {
+      if (aiStatus.ready) {
+        return {
+          badgeClass: 'online cloud',
+          label: `☁️ Cloud API — ${model} Ready`,
+        }
+      }
+      return {
+        badgeClass: 'offline',
+        label: `☁️ API Provider — ${status}`,
+      }
+    }
 
     switch (status) {
       case 'STARTING':
-        return {
-          badgeClass: 'starting',
-          label: 'Starting local Ollama…',
-        }
+        return { badgeClass: 'starting', label: 'Starting local Ollama…' }
       case 'OFFLINE':
-        return {
-          badgeClass: 'offline',
-          label: 'Ollama Offline',
-        }
+        return { badgeClass: 'offline', label: 'Local Ollama Offline' }
       case 'ONLINE':
-        return {
-          badgeClass: 'starting',
-          label: `Ollama Online — Checking ${model}…`,
-        }
+        return { badgeClass: 'starting', label: `Ollama Online — Checking ${model}…` }
       case 'MODEL_MISSING':
-        return {
-          badgeClass: 'offline',
-          label: `Ollama Online — ${model} not installed`,
-        }
+        return { badgeClass: 'offline', label: `Ollama Online — ${model} not installed` }
       case 'PULLING':
-        return {
-          badgeClass: 'pulling',
-          label: `Downloading ${model} model…`,
-        }
+        return { badgeClass: 'pulling', label: `Downloading ${model}…` }
       case 'READY':
-        return {
-          badgeClass: 'online',
-          label: `🟢 Local Ollama — ${model} Ready`,
-        }
-      case 'DISABLED':
-        return {
-          badgeClass: 'offline',
-          label: 'Local Ollama Disabled',
-        }
-      case 'ERROR':
+        return { badgeClass: 'online', label: `🟢 Local Ollama — ${model} Ready` }
       default:
-        return {
-          badgeClass: 'offline',
-          label: 'Ollama Error',
-        }
+        return { badgeClass: 'offline', label: 'AI Offline' }
     }
   }
 
+  // Handle Test Connection
+  const handleTestConnection = async () => {
+    setTestingConnection(true)
+    setTestResult(null)
+    try {
+      const payload = {
+        provider_type: settingsForm.active_provider,
+        model: settingsForm.active_provider === 'ollama' ? settingsForm.ollama_model : settingsForm.api_model,
+        base_url: settingsForm.active_provider === 'ollama' ? settingsForm.ollama_base_url : settingsForm.api_base_url,
+        api_key: settingsForm.api_key || undefined,
+      }
+      const res = await api.post('/api/ai/test', payload)
+      setTestResult({
+        success: true,
+        message: `Connected successfully to ${payload.model} (${res.data?.status || 'READY'})`,
+      })
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: err.response?.data?.error || 'Connection failed. Please verify provider settings and network access.',
+      })
+    } finally {
+      setTestingConnection(false)
+    }
+  }
+
+  // Handle Save Settings
+  const handleSaveSettings = async () => {
+    setSavingSettings(true)
+    setSaveSuccessMsg('')
+    try {
+      const payload = {
+        active_provider: settingsForm.active_provider,
+        ollama: {
+          model: settingsForm.ollama_model,
+          base_url: settingsForm.ollama_base_url,
+        },
+        api: {
+          provider_type: settingsForm.api_provider_type,
+          model: settingsForm.api_model,
+          base_url: settingsForm.api_base_url,
+          api_key: settingsForm.api_key,
+        },
+      }
+      await api.post('/api/ai/config', payload)
+      setSaveSuccessMsg('AI Provider configuration saved successfully!')
+      await checkStatus()
+      await loadConfig()
+      setTimeout(() => setSaveSuccessMsg(''), 3000)
+    } catch (err) {
+      setErrorMsg(err.response?.data?.error || 'Failed to save configuration.')
+    } finally {
+      setSavingSettings(false)
+    }
+  }
+
+  // Handle Send Message
   const handleSendMessage = async (textToSend = null) => {
     const query = (textToSend || inputMessage).trim()
     if (!query || loading) return
@@ -154,13 +250,11 @@ export default function HlaAiAssistant({
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     }
 
-    // Append user message immediately
     const updatedMessages = [...messages, userMsg]
     setMessages(updatedMessages)
     setLoading(true)
 
     try {
-      // Build lightweight conversation history for the backend (last 6 items)
       const historyPayload = updatedMessages.slice(-6).map((m) => ({
         role: m.role,
         content: m.content,
@@ -180,18 +274,24 @@ export default function HlaAiAssistant({
             role: 'assistant',
             content: res.data.response,
             context_used: Boolean(res.data.context_used),
+            intent: res.data.intent,
+            provider: res.data.provider,
+            model: res.data.model,
+            is_cloud: res.data.is_cloud,
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           },
         ])
       } else {
-        setErrorMsg(res.data.error || 'Failed to receive a response from AI.')
+        setErrorMsg(res.data?.error || 'Failed to receive a response from AI.')
       }
     } catch (err) {
       const serverErr =
         err.response?.data?.error ||
         (err.response?.status === 429
           ? 'Rate limit exceeded. Please wait a moment.'
-          : 'AI service is currently unavailable. Please try again later.')
+          : aiStatus.is_cloud
+          ? 'API connection failed. Check the API key and provider settings.'
+          : 'Local Ollama is unavailable. Start Ollama or select an API provider.')
       setErrorMsg(serverErr)
     } finally {
       setLoading(false)
@@ -209,7 +309,7 @@ export default function HlaAiAssistant({
     setMessages([
       {
         role: 'assistant',
-        content: `Session chat history cleared. Ready for your questions!`,
+        content: `Session chat history cleared. Document-driven ground truth is active!`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         context_used: false,
       },
@@ -225,13 +325,20 @@ export default function HlaAiAssistant({
     }
   }
 
-  // Quick Prompt Pills
-  const promptPills = [
-    'Explain what HLA Studio does',
-    'Explain Control 6',
-    'Why did Control 6 fail?',
-    'Summarize this project\'s controls',
-  ]
+  // Generic Document-Driven Suggestions
+  const promptPills = activeDoc
+    ? [
+        `Summarize ${activeDoc.original_name || 'uploaded document'}`,
+        'What source tables are defined?',
+        'Show business and reconciliation rules',
+        'Why did execution fail?',
+      ]
+    : [
+        'Explain HLA Studio capabilities',
+        'Summarize this workspace',
+        'What are HLA generic target principles?',
+        'How does reconciliation work?',
+      ]
 
   if (!isOpen) return null
 
@@ -250,17 +357,29 @@ export default function HlaAiAssistant({
             <div className="ai-title-group">
               <div className="ai-title-row">
                 <h3>HLA AI Assistant</h3>
-                <span className="ai-model-tag" title="Configured local model">
+                <span className={`ai-provider-badge ${aiStatus.is_cloud ? 'cloud' : 'local'}`}>
+                  {aiStatus.is_cloud ? 'Cloud API' : 'Local Ollama'}
+                </span>
+                <span className="ai-model-tag" title="Active Model">
                   {aiStatus.model}
                 </span>
               </div>
-              <span className="ai-status-sub">
-                {statusDisplay.label}
-              </span>
+              <span className="ai-status-sub">{statusDisplay.label}</span>
             </div>
           </div>
 
           <div className="ai-header-actions">
+            <button
+              className={`btn-ai-header-action ${showSettings ? 'active' : ''}`}
+              onClick={() => setShowSettings(!showSettings)}
+              title="Configure AI Provider & Models"
+              aria-label="AI Settings"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
+            </button>
             <button
               className="btn-ai-header-action"
               onClick={handleClearChat}
@@ -275,7 +394,7 @@ export default function HlaAiAssistant({
             <button
               className="btn-ai-header-close"
               onClick={onClose}
-              title="Close Assistant (Esc)"
+              title="Close Assistant"
               aria-label="Close Assistant"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -285,6 +404,17 @@ export default function HlaAiAssistant({
             </button>
           </div>
         </div>
+
+        {/* ── Privacy & Cloud Notice Banner ── */}
+        {aiStatus.is_cloud ? (
+          <div className="ai-privacy-notice cloud">
+            <span>☁️ External Provider Active: AI requests are processed by the configured external model.</span>
+          </div>
+        ) : (
+          <div className="ai-privacy-notice local">
+            <span>🔒 Local-First Mode: Prompts and HLA metadata remain completely local on your machine.</span>
+          </div>
+        )}
 
         {/* ── Active Context Ribbon ── */}
         <div className="ai-context-ribbon">
@@ -302,11 +432,145 @@ export default function HlaAiAssistant({
           )}
           {activeDoc && (
             <div className="context-item" title={activeDoc.original_name}>
-              <span className="context-label">Document:</span>
+              <span className="context-label">Source Document:</span>
               <span className="context-value">{activeDoc.original_name}</span>
             </div>
           )}
         </div>
+
+        {/* ── Provider Settings Modal Panel (Collapsible) ── */}
+        {showSettings && (
+          <div className="ai-settings-panel">
+            <div className="ai-settings-header">
+              <h4>⚙️ AI Provider Settings</h4>
+              <button className="btn-close-settings" onClick={() => setShowSettings(false)}>✕</button>
+            </div>
+
+            <div className="settings-field">
+              <label className="field-label">AI Provider:</label>
+              <div className="provider-toggle-group">
+                <button
+                  type="button"
+                  className={`btn-provider-toggle ${settingsForm.active_provider === 'ollama' ? 'selected' : ''}`}
+                  onClick={() => setSettingsForm({ ...settingsForm, active_provider: 'ollama' })}
+                >
+                  🟢 Local Ollama (Default)
+                </button>
+                <button
+                  type="button"
+                  className={`btn-provider-toggle ${settingsForm.active_provider === 'api' ? 'selected' : ''}`}
+                  onClick={() => setSettingsForm({ ...settingsForm, active_provider: 'api' })}
+                >
+                  ☁️ API Provider (Cloud)
+                </button>
+              </div>
+            </div>
+
+            {settingsForm.active_provider === 'ollama' ? (
+              <div className="provider-sub-form">
+                <div className="settings-field">
+                  <label className="field-label">Model Name:</label>
+                  <input
+                    type="text"
+                    className="ai-settings-input"
+                    value={settingsForm.ollama_model}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, ollama_model: e.target.value })}
+                    placeholder="qwen3:latest"
+                  />
+                  <span className="field-hint">Default is qwen3. Requires no external API keys.</span>
+                </div>
+                <div className="settings-field">
+                  <label className="field-label">Ollama Host URL:</label>
+                  <input
+                    type="text"
+                    className="ai-settings-input"
+                    value={settingsForm.ollama_base_url}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, ollama_base_url: e.target.value })}
+                    placeholder="http://127.0.0.1:11434"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="provider-sub-form">
+                <div className="settings-field">
+                  <label className="field-label">Cloud Provider Type:</label>
+                  <select
+                    className="ai-settings-select"
+                    value={settingsForm.api_provider_type}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, api_provider_type: e.target.value })}
+                  >
+                    <option value="openai">OpenAI (GPT-4o, GPT-4o-mini)</option>
+                    <option value="anthropic">Anthropic (Claude 3.5 Sonnet)</option>
+                    <option value="groq">Groq (Llama 3.3 70B)</option>
+                    <option value="custom">Custom / OpenAI-Compatible</option>
+                  </select>
+                </div>
+                <div className="settings-field">
+                  <label className="field-label">Model Identifier:</label>
+                  <input
+                    type="text"
+                    className="ai-settings-input"
+                    value={settingsForm.api_model}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, api_model: e.target.value })}
+                    placeholder="e.g. gpt-4o-mini, claude-3-5-sonnet-20241022"
+                  />
+                </div>
+                <div className="settings-field">
+                  <label className="field-label">
+                    API Key: {settingsForm.has_api_key && <span className="key-configured-tag">✓ Configured</span>}
+                  </label>
+                  <input
+                    type="password"
+                    className="ai-settings-input"
+                    value={settingsForm.api_key}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, api_key: e.target.value })}
+                    placeholder={settingsForm.has_api_key ? '•••••••••••••••• (Leave blank to keep)' : 'Enter your API key'}
+                  />
+                  <span className="field-hint">Stored encrypted on backend. Never exposed to browser.</span>
+                </div>
+                <div className="settings-field">
+                  <label className="field-label">Custom Endpoint URL (Optional):</label>
+                  <input
+                    type="text"
+                    className="ai-settings-input"
+                    value={settingsForm.api_base_url}
+                    onChange={(e) => setSettingsForm({ ...settingsForm, api_base_url: e.target.value })}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </div>
+              </div>
+            )}
+
+            {testResult && (
+              <div className={`test-feedback ${testResult.success ? 'success' : 'failure'}`}>
+                {testResult.success ? '✓' : '⚠️'} {testResult.message}
+              </div>
+            )}
+
+            {saveSuccessMsg && (
+              <div className="test-feedback success">✓ {saveSuccessMsg}</div>
+            )}
+
+            <div className="settings-action-row">
+              <button
+                type="button"
+                className="btn-test-conn"
+                onClick={handleTestConnection}
+                disabled={testingConnection}
+              >
+                {testingConnection ? 'Testing…' : 'Test Connection'}
+              </button>
+              <button
+                type="button"
+                className="btn-save-conn"
+                onClick={handleSaveSettings}
+                disabled={savingSettings}
+              >
+                {savingSettings ? 'Saving…' : 'Save Settings'}
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* ── Message Stream ── */}
         <div className="ai-message-stream">
@@ -324,9 +588,14 @@ export default function HlaAiAssistant({
                     {msg.role === 'assistant' ? 'HLA Copilot' : currentUser?.username || 'You'}
                   </span>
                   <div className="msg-header-right">
+                    {msg.intent && (
+                      <span className="intent-tag" title={`Parsed Intent: ${msg.intent}`}>
+                        🎯 {msg.intent}
+                      </span>
+                    )}
                     {msg.context_used && (
-                      <span className="grounded-tag" title="Grounded with authorized PostgreSQL HLA data">
-                        🎯 HLA Grounded
+                      <span className="grounded-tag" title="Grounded with extracted document metadata">
+                        📄 Document Grounded
                       </span>
                     )}
                     <span className="msg-time">{msg.timestamp}</span>
@@ -358,7 +627,7 @@ export default function HlaAiAssistant({
             </div>
           ))}
 
-          {/* Thinking / Spinner Indicator */}
+          {/* Thinking Spinner */}
           {loading && (
             <div className="ai-message-wrapper assistant">
               <div className="msg-avatar assistant">
@@ -367,7 +636,9 @@ export default function HlaAiAssistant({
               <div className="ai-message-bubble loading-bubble">
                 <div className="ai-thinking-indicator">
                   <div className="ai-dot-pulse" />
-                  <span>Consulting local {aiStatus.model} & querying authorized records…</span>
+                  <span>
+                    Consulting {aiStatus.is_cloud ? `cloud ${aiStatus.model}` : `local ${aiStatus.model}`} & analyzing document metadata…
+                  </span>
                 </div>
               </div>
             </div>
@@ -389,7 +660,7 @@ export default function HlaAiAssistant({
           <div ref={messagesEndRef} />
         </div>
 
-        {/* ── Quick Prompt Chips ── */}
+        {/* ── Quick Prompt Pills ── */}
         <div className="ai-quick-prompts">
           <span className="quick-prompts-label">Suggestions:</span>
           <div className="quick-prompts-list">
@@ -412,7 +683,7 @@ export default function HlaAiAssistant({
             <textarea
               ref={textareaRef}
               className="ai-textarea"
-              placeholder="Ask about Control 6, execution status, architecture, or reconciliation rules..."
+              placeholder="Ask about source tables, business rules, null values, or target architecture..."
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -434,7 +705,7 @@ export default function HlaAiAssistant({
           </div>
           <div className="ai-input-footer">
             <span>Enter to send • Shift + Enter for new line</span>
-            <span className="zero-trust-indicator">🔒 Zero-Trust RBAC Enforced</span>
+            <span className="zero-trust-indicator">🔒 Generic Document Grounding</span>
           </div>
         </div>
       </aside>
@@ -448,7 +719,6 @@ export default function HlaAiAssistant({
 function renderFormattedMarkdown(text) {
   if (!text) return null
 
-  // Split text by markdown code blocks (```...```)
   const parts = text.split(/(```[\s\S]*?```)/g)
 
   return parts.map((part, index) => {
@@ -469,7 +739,6 @@ function renderFormattedMarkdown(text) {
       )
     }
 
-    // Normal text lines
     const paragraphs = part.split('\n\n')
     return (
       <div key={index} className="ai-text-block">
@@ -477,7 +746,6 @@ function renderFormattedMarkdown(text) {
           const trimmed = p.trim()
           if (!trimmed) return null
 
-          // Bullet list
           if (trimmed.includes('\n• ') || trimmed.startsWith('• ') || trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
             const listItems = trimmed.split(/\n(?=[•\-\*]\s|\d+\.\s)/)
             return (
@@ -491,7 +759,6 @@ function renderFormattedMarkdown(text) {
             )
           }
 
-          // Headers
           if (trimmed.startsWith('### ')) {
             return <h4 key={pIdx} className="ai-md-h4">{renderInlineStyles(trimmed.replace(/^###\s+/, ''))}</h4>
           }
@@ -515,13 +782,11 @@ function renderFormattedMarkdown(text) {
 
 function renderInlineStyles(str) {
   if (!str) return ''
-  // Process bold: **text**
   const boldParts = str.split(/(\*\*.*?\*\*)/g)
   return boldParts.map((bPart, bIdx) => {
     if (bPart.startsWith('**') && bPart.endsWith('**')) {
       return <strong key={bIdx}>{bPart.slice(2, -2)}</strong>
     }
-    // Inline code: `text`
     const codeParts = bPart.split(/(`.*?`)/g)
     return codeParts.map((cPart, cIdx) => {
       if (cPart.startsWith('`') && cPart.endsWith('`')) {

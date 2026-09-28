@@ -24,7 +24,25 @@ class TestControlIndependence(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.engine = create_engine(Config.SQLALCHEMY_DATABASE_URI)
+        from sqlalchemy import text
+        with cls.engine.begin() as conn:
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS reports"))
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS cmdb"))
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS ra_ctrl"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS reports.dl_vdom_firewall_audit_report (application_name VARCHAR(255))"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS cmdb.dl_itsm_cmdb_daily_dump (production_ip VARCHAR(255), cmdb_production_ip VARCHAR(255))"))
+            try:
+                conn.execute(text("ALTER TABLE cmdb.dl_itsm_cmdb_daily_dump ADD COLUMN IF NOT EXISTS production_ip VARCHAR(255)"))
+            except Exception:
+                pass
+
         cls.deployment_engine = DeploymentEngine(cls.engine)
+        cls.deployment_engine.planner.dep_resolver.source_resolver.registry.register_stream(
+            "VUTM/DOOS", "reports", "dl_vdom_firewall_audit_report", "Reports DB", "SRC001"
+        )
+        cls.deployment_engine.planner.dep_resolver.source_resolver.registry.register_stream(
+            "CMDB", "cmdb", "dl_itsm_cmdb_daily_dump", "ITSM DB", "SRC002"
+        )
 
     def test_multi_control_code_path_consistency(self):
         control_ids = [23, 24, 25, 26, 88, 99]

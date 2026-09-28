@@ -25,7 +25,7 @@ class PhysicalSourceResolver:
         stream = self.registry.get_stream(logical_stream_name)
         if not stream:
             raise SourceDependencyMissingError(
-                f"No physical source mapping found in registry for logical stream '{logical_stream_name}'.",
+                f"SOURCE CONNECTION NOT CONFIGURED:\nSource '{logical_stream_name}' is defined in the HLA but has no configured connection.",
                 control_id=control_id,
                 source=logical_stream_name
             )
@@ -33,8 +33,10 @@ class PhysicalSourceResolver:
         # Introspect table in PostgreSQL
         meta = self.introspector.get_table_metadata(stream.physical_schema, stream.physical_table)
         if not meta.exists:
+            source_id_str = stream.source_id or "N/A"
+            source_sys_str = stream.source_system or "N/A"
             raise SourceDependencyMissingError(
-                f"Physical source table \"{stream.physical_schema}\".\"{stream.physical_table}\" does not exist in database for stream '{logical_stream_name}'.",
+                f"SOURCE TABLE NOT FOUND:\nSource ID: {source_id_str}\nSource: {source_sys_str}\nSchema: {stream.physical_schema}\nTable: {stream.physical_table}",
                 control_id=control_id,
                 source=f"{stream.physical_schema}.{stream.physical_table}"
             )

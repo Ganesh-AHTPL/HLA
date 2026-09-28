@@ -20,16 +20,20 @@ class DDLGenerator:
         table_name: str,
         business_columns: List[Tuple[str, str]],
         primary_key_columns: Optional[List[str]] = None,
-        create_indexes: bool = True
+        create_indexes: bool = True,
+        target_envelope: str = "NONE"
     ) -> str:
         """
-        Generates full CREATE TABLE DDL with envelope columns, clean types, and index statements.
+        Generates full CREATE TABLE DDL with clean types and optional envelope columns.
         """
         schema_clean = schema_name.strip().strip('"').lower()
         table_clean = table_name.strip().strip('"').lower()
 
-        # Enforce envelope columns
-        full_columns = ColumnOrderValidator.enforce_envelope(business_columns)
+        # Enforce envelope columns ONLY if explicitly requested (e.g. LEGACY_CONTROL)
+        if (target_envelope or "NONE").upper() == "LEGACY_CONTROL":
+            full_columns = ColumnOrderValidator.enforce_envelope(business_columns)
+        else:
+            full_columns = [(name.strip().lower(), col_type.strip()) for name, col_type in business_columns]
 
         col_defs = []
         for col_name, col_type in full_columns:
@@ -49,8 +53,8 @@ class DDLGenerator:
             ');'
         ]
 
-        # Add standard envelope index for performance
-        if create_indexes:
+        # Add standard envelope index for performance ONLY in legacy control mode
+        if create_indexes and (target_envelope or "NONE").upper() == "LEGACY_CONTROL":
             idx_name = f'idx_{table_clean[:40]}_exec'
             lines.append(
                 f'CREATE INDEX IF NOT EXISTS "{idx_name}" ON "{schema_clean}"."{table_clean}" ("ctrl_id", "exec_seq", "execution_date");'

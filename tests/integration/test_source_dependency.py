@@ -22,12 +22,26 @@ class TestSourceDependencyIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.engine = create_engine(Config.SQLALCHEMY_DATABASE_URI)
+        from sqlalchemy import text
+        with cls.engine.begin() as conn:
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS reports"))
+            conn.execute(text("CREATE SCHEMA IF NOT EXISTS cmdb"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS reports.dl_vdom_firewall_audit_report (application_name VARCHAR(255))"))
+            conn.execute(text("CREATE TABLE IF NOT EXISTS cmdb.dl_itsm_cmdb_daily_dump (cmdb_production_ip VARCHAR(255))"))
 
     def test_dependency_validation_against_existing_tables(self):
         dep_resolver = DependencyResolver(self.engine)
         context = ControlContext(
             control_id=99,
             control_name="Integration Test Control"
+        )
+
+        # Register dynamic test streams in registry
+        dep_resolver.source_resolver.registry.register_stream(
+            "VUTM/DOOS", "reports", "dl_vdom_firewall_audit_report", "Reports DB", "SRC001"
+        )
+        dep_resolver.source_resolver.registry.register_stream(
+            "CMDB", "cmdb", "dl_itsm_cmdb_daily_dump", "ITSM DB", "SRC002"
         )
 
         mappings = [

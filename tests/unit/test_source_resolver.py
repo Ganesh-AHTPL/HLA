@@ -9,17 +9,42 @@ from backend.source.source_metadata import AttributeMapping
 
 class TestSourceAndColumnResolver(unittest.TestCase):
 
-    def test_source_registry_defaults(self):
+    def test_source_registry_dynamic_registration(self):
         reg = SourceRegistry()
-        stream = reg.get_stream("VUTM/DOOS")
+        reg.register_stream(
+            logical_name="CUSTOMER_STREAM",
+            physical_schema="customer",
+            physical_table="customer_master",
+            source_system="CRM_DB",
+            source_id="SRC001"
+        )
+        stream = reg.get_stream("CUSTOMER_STREAM")
         self.assertIsNotNone(stream)
-        self.assertEqual(stream.physical_schema, "reports")
-        self.assertEqual(stream.physical_table, "dl_vdom_firewall_audit_report")
+        self.assertEqual(stream.physical_schema, "customer")
+        self.assertEqual(stream.physical_table, "customer_master")
+        self.assertEqual(stream.source_system, "CRM_DB")
+        self.assertEqual(stream.source_id, "SRC001")
 
-        stream_cmdb = reg.get_stream("CMDB")
-        self.assertIsNotNone(stream_cmdb)
-        self.assertEqual(stream_cmdb.physical_schema, "cmdb")
-        self.assertEqual(stream_cmdb.physical_table, "dl_itsm_cmdb_daily_dump")
+    def test_source_registry_from_analysis(self):
+        reg = SourceRegistry()
+        analysis_data = {
+            "sources": [
+                {
+                    "source_id": "SRC002",
+                    "source_name": "SALES_DB",
+                    "schema_name": "sales",
+                    "table_name": "sales_transaction",
+                    "full_table_name": "sales.sales_transaction"
+                }
+            ]
+        }
+        reg.register_sources_from_analysis(analysis_data)
+        stream = reg.get_stream("sales.sales_transaction")
+        self.assertIsNotNone(stream)
+        self.assertEqual(stream.physical_schema, "sales")
+        self.assertEqual(stream.physical_table, "sales_transaction")
+        self.assertEqual(stream.source_system, "SALES_DB")
+        self.assertEqual(stream.source_id, "SRC002")
 
     def test_source_registry_custom_overrides(self):
         custom = {

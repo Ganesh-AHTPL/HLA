@@ -25,7 +25,7 @@ class TestSchemaAndDDL(unittest.TestCase):
 
     def test_ddl_generator_output(self):
         biz_cols = [("vdom", "VARCHAR(100)"), ("ip", "VARCHAR(50)")]
-        ddl = DDLGenerator.generate_create_table_ddl("ra_ctrl", "ctrl_99_source_vdom", biz_cols)
+        ddl = DDLGenerator.generate_create_table_ddl("ra_ctrl", "ctrl_99_source_vdom", biz_cols, target_envelope="LEGACY_CONTROL")
 
         self.assertIn('CREATE TABLE IF NOT EXISTS "ra_ctrl"."ctrl_99_source_vdom"', ddl)
         self.assertIn('"ctrl_id" INTEGER', ddl)
@@ -37,11 +37,12 @@ class TestSchemaAndDDL(unittest.TestCase):
         self.assertIn('"processing_date" DATE DEFAULT CURRENT_DATE', ddl)
 
     def test_schema_validator_rejects_external_source_as_target(self):
+        source_schemas = {"cmdb", "pearl", "sfdc", "reports", "ra"}
         for ext_schema in ["cmdb", "pearl", "sfdc", "reports", "ra"]:
-            val = SchemaValidator.validate_target_schema_name(ext_schema)
+            val = SchemaValidator.validate_target_schema_name(ext_schema, known_source_schemas=source_schemas)
             self.assertFalse(val.is_valid)
 
-        val_ok = SchemaValidator.validate_target_schema_name("ra_ctrl")
+        val_ok = SchemaValidator.validate_target_schema_name("ra_ctrl", known_source_schemas=source_schemas)
         self.assertTrue(val_ok.is_valid)
 
     def test_ddl_validator_rejects_synthetic_prefixes(self):

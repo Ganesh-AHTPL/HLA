@@ -288,39 +288,41 @@ def parse_source_systems(ws) -> tuple:
         if not raw_tbl and not sys_name:
             continue
 
-        # Handle 'reports.dl_vdom_firewall_audit_report' format where schema is embedded in table name
-        if "." in raw_tbl and not raw_schema:
-            schema, tbl = raw_tbl.split(".", 1)
-        else:
-            schema = raw_schema
-            tbl = raw_tbl
+        # Handle dot-separated format e.g. 'customer.customer_master' or 'db.customer.customer_master'
+        extracted_db = ""
+        extracted_schema = ""
+        clean_tbl = raw_tbl.strip()
 
-        full_table_name = f"{schema}.{tbl}" if schema and tbl else (tbl or sys_name)
-
-        # Derive clean, human-friendly system name if not present
-        if not sys_name:
-            tbl_lower = full_table_name.lower()
-            if "cmdb" in tbl_lower:
-                sys_name = "ServiceNow CMDB"
-            elif "vdom" in tbl_lower or "firewall" in tbl_lower:
-                sys_name = "FortiManager Firewall VDOM"
-            elif "pearl" in tbl_lower:
-                sys_name = "Pearl Billing Core"
-            elif "ra" in tbl_lower or "order" in tbl_lower:
-                sys_name = "Revenue Assurance"
-            elif "sfdc" in tbl_lower or "copf" in tbl_lower:
-                sys_name = "Salesforce CRM"
-            elif "ckt" in tbl_lower or "circuit" in tbl_lower:
-                sys_name = "Circuit Reco Staging"
-            elif db_name:
-                sys_name = f"{db_name} Database"
+        if "." in raw_tbl:
+            dot_parts = [p.strip() for p in raw_tbl.split(".") if p.strip()]
+            if len(dot_parts) >= 3:
+                extracted_db = dot_parts[0]
+                extracted_schema = dot_parts[1]
+                clean_tbl = dot_parts[2]
+            elif len(dot_parts) == 2:
+                extracted_schema = dot_parts[0]
+                clean_tbl = dot_parts[1]
             else:
-                sys_name = schema.upper() if schema else "Enterprise Source"
+                clean_tbl = dot_parts[0]
+
+        schema = raw_schema.strip() or extracted_schema or "public"
+        tbl = clean_tbl
+
+        # Strip accidental schema prefix from table name if present
+        if schema and tbl.lower().startswith(schema.lower() + "."):
+            tbl = tbl[len(schema)+1:].strip()
+
+        full_table_name = f"{schema}.{tbl}" if schema else tbl
+
+        # Resolve system/database name purely from document metadata without guessing
+        if not sys_name:
+            sys_name = db_name or extracted_db or schema.upper() or "Source System"
 
         src_item = {
             "source_id": f"SRC-{len(sources) + 1:02d}",
             "source_name": sys_name,
             "source_system": sys_name,
+            "database": db_name or "datalake",
             "server": server or "localhost",
             "source_db": db_name or "datalake",
             "database_name": db_name or "datalake",
@@ -1134,191 +1136,11 @@ def analyze_excel_specification(file_path: str) -> dict:
     """
     Main entry point for completely analyzing standard Excel solution logic workbooks.
     Zero hardcoded values: dynamically detects all sheets, headers, and entity logic.
-    100% Complete scan of all 7 sheets, all rows, columns, and populated cells.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Excel specification not found at: {file_path}")
 
-    wb = openpyxl.load_workbook(file_path, data_only=True)
+    from backend.core.semantic_analyzer import SemanticAnalyzer
+    return SemanticAnalyzer.analyze_workbook(file_path)
 
-    # 1. Control Overview & Identification
-    control_id = extract_control_identification(wb)
 
-    # 2. Dynamic sheet dispatching (matches by content headers across all indexed sheets)
-    ws_sources = find_sheet_by_content_or_keywords(wb, ['sourcesystem', 'source_system', 'sources', 'monitoring'], ['table name', 'schema', 'type of load', 'load', 'frequency', 'db'])
-    ws_inputs = find_sheet_by_content_or_keywords(wb, ['sourceinput', 'source_input', 'staging'], ['source field', 'table name'])
-    ws_filters = find_sheet_by_content_or_keywords(wb, ['preexecution', 'filter', 'validation'], ['filter', 'rule'])
-    ws_model = find_sheet_by_content_or_keywords(wb, ['datamodel', 'data_model', 'model'], ['stage', 'table', 'load type'])
-    ws_rules = find_sheet_by_content_or_keywords(wb, ['businessrule', 'business_rule', 'rule'], ['rule id', 'data stream', 'rule description', 'rule'])
-    ws_kri = find_sheet_by_content_or_keywords(wb, ['bucket', 'kri', 'resultant'], ['output result', 'kri id', 'description'])
-    ws_reports = find_sheet_by_content_or_keywords(wb, ['reportderivation', 'report_derivation', 'derivation', 'report'], ['report', 'attribute', 'source field'])
-    if not ws_reports and 'Report Derivation Logic' in wb.sheetnames:
-        ws_reports = wb['Report Derivation Logic']
-    ws_config = find_sheet_by_keywords(wb, ['config', 'configuration'])
-    ws_mapping = find_sheet_by_content_or_keywords(wb, ['attributemapping', 'attribute_mapping', 'mapping', 'attribute'], ['column name', 'source field', 'table name'])
-
-    # 3. Parse individual components
-    sources, source_databases = parse_source_systems(ws_sources) if ws_sources else ([], [])
-    control_id["schedule"] = extract_control_schedule(wb, sources)
-    control_id["frequency"] = control_id["schedule"].get("frequency_display")
-    staging_inputs = parse_source_input_tables(ws_inputs) if ws_inputs else []
-    filters_data = parse_pre_execution_filters(ws_filters) if ws_filters else {}
-    data_model_tables = parse_data_model(ws_model) if ws_model else []
-    rules_data, column_catalog = parse_business_rules(ws_rules) if ws_rules else ({}, {})
-    buckets, derived_fields = parse_buckets_and_kri_rules(ws_kri) if ws_kri else ([], [])
-    config_tables = parse_config_tables(ws_config) if ws_config else []
-    reports = parse_report_derivation_logic(ws_reports) if ws_reports else []
-
-    # 4. Attribute Mappings
-    sheet_mappings = parse_attribute_mapping_sheet(ws_mapping) if ws_mapping else []
-    mappings = sheet_mappings if sheet_mappings else build_attribute_mappings(sources, rules_data, derived_fields, config_tables)
-
-    # 5. Authoritative Pre-Generation HLA Analysis Summary
-    hla_summary = build_hla_analysis_summary(
-        wb, file_path, sources, source_databases, rules_data, buckets, data_model_tables, reports, config_tables, mappings
-    )
-
-    # 6. Extraction requirements (aligned with standard template table 7)
-    extraction_requirements = []
-    for s in sources:
-        extraction_requirements.append({
-            "source_name": s.get("source_name"),
-            "table_name": s.get("table_name"),
-            "full_table_name": s.get("full_table_name"),
-            "extraction_method": s.get("type_of_load", "Truncate and load"),
-            "refresh_frequency": s.get("refresh_time", "Daily"),
-            "data_lake_destination": f"stg_{s.get('table_name')}",
-            "notes": s.get("notes")
-        })
-
-    # 7. Report inventory & attributes
-    report_inventory = []
-    for rep in reports:
-        report_inventory.append({
-            "report_id": rep.get("report_name", "Report"),
-            "report_name": rep.get("report_name", "Management Report"),
-            "description": f"Derived management report with {len(rep.get('attributes', []))} attributes",
-            "frequency": "Daily Recon Run",
-            "destination_table": f"{control_id['target_schema']}.report_{_norm_token(rep.get('report_name', 'rpt'))}",
-            "attributes": rep.get("attributes", [])
-        })
-    if not report_inventory:
-        for b in buckets:
-            report_inventory.append({
-                "report_id": b.get("bucket_id"),
-                "report_name": f"Bucket {b.get('bucket_id')} - {b.get('kri_id') or 'Recon Outcome'}",
-                "description": b.get("description"),
-                "frequency": "Daily Recon Run",
-                "destination_table": f"{control_id['target_schema']}.work_item_{b.get('bucket_id').lower()}"
-            })
-
-    # If no source_databases were parsed from Source Systems sheet, create fallback custom DB
-    if not source_databases:
-        all_tbls = [s.get("full_table_name") or s.get("table_name") for s in sources]
-        source_databases = [{
-            "source_db_name": "Custom Source DB",
-            "database_name": "custom_db",
-            "host": "localhost",
-            "port": "5432",
-            "schema_name": "public",
-            "connection_type": "PostgreSQL",
-            "credential_reference": "",
-            "environment": "Production",
-            "tables": all_tbls
-        }]
-
-    # Build control overview
-    control_overview = {
-        "identification": {
-            "control_number": control_id["control_number"],
-            "control_title": control_id["control_title"],
-            "purpose": control_id["purpose"]
-        },
-        "target_schema": control_id["target_schema"],
-        "control_digits": control_id.get("control_num_raw", "23"),
-        "target_schema_info": {
-            "schema_name": control_id["target_schema"],
-            "environment": "Production"
-        },
-        "schedule": control_id.get("schedule"),
-        "frequency": control_id.get("frequency") or "Monthly (1st of every month)",
-        "db_connections": source_databases
-    }
-
-    # Development flow stages from data model
-    dev_flow = []
-    for stage_name in ["ETL Acquisition", "Pre-Execution", "Post-Execution", "Config"]:
-        stage_tbls = [t["table_name"] for t in data_model_tables if t.get("stage") == stage_name]
-        if stage_tbls:
-            dev_flow.append({
-                "stage": stage_name,
-                "description": f"Pipeline processing for {stage_name}",
-                "entities": stage_tbls
-            })
-
-    original_name = os.path.basename(file_path)
-
-    summary_counts = {
-        "sheets_scanned": hla_summary["sheets_scanned_count"],
-        "total_rows_scanned": hla_summary["total_rows_scanned"],
-        "total_populated_cells": hla_summary["total_populated_cells"],
-        "total_sources": len(sources),
-        "total_source_dbs": len(source_databases),
-        "truncate_sources": sum(1 for s in sources if "truncate" in s.get("type_of_load", "").lower()),
-        "append_sources": sum(1 for s in sources if "append" in s.get("type_of_load", "").lower()),
-        "filter_rules": len(rules_data.get("filter_rules", [])),
-        "balance_rules": len(rules_data.get("balance_rules", [])),
-        "reconciliation_flows": len(rules_data.get("reconciliation_flows", [])),
-        "total_rules": hla_summary["entities_discovered"]["business_rules_count"],
-        "total_attributes": len(mappings),
-        "direct_attributes": sum(1 for m in mappings if m.get("mapping_type") == "Direct"),
-        "derived_attributes": sum(1 for m in mappings if m.get("mapping_type") == "Derived"),
-        "data_model_tables": len(data_model_tables),
-        "resultant_buckets": len(buckets),
-        "derived_fields": len(derived_fields),
-        "config_tables": len(config_tables),
-        "total_config_values": hla_summary["entities_discovered"]["configuration_values_count"],
-        "total_reports": len(reports),
-        "total_report_attributes": hla_summary["entities_discovered"]["report_attributes_count"],
-        "compliance_score": 100
-    }
-
-    result = {
-        "original_name": original_name,
-        "format_type": "EXCEL_SPECIFICATION",
-        "hla_analysis_summary": hla_summary,
-        "control_overview": control_overview,
-        "source_databases": source_databases,
-        "sources": sources,
-        "staging_inputs": staging_inputs,
-        "pre_execution_filters": filters_data,
-        "data_model": data_model_tables,
-        "rules": rules_data,
-        "column_catalog": column_catalog,
-        "buckets": buckets,
-        "derived_fields": derived_fields,
-        "mappings": mappings,
-        "reports": reports,
-        "extraction_requirements": extraction_requirements,
-        "development_flow": dev_flow,
-        "config_tables": config_tables,
-        "report_inventory": report_inventory,
-        "summary_counts": summary_counts,
-        "template_compliance": {
-            "compliance_score": 100,
-            "status": "COMPLIANT",
-            "passed_checks": [
-                "Sheet 1: Source Systems complete scan",
-                "Sheet 2: Attribute Mapping complete scan (32 columns)",
-                "Sheet 3: Business Rules complete scan (I1-I4, R1-R15)",
-                "Sheet 4: Buckets & KRI Logic complete scan",
-                "Sheet 5: Data Model complete scan (25 tables)",
-                "Sheet 6: Report Derivation Logic complete scan (4 reports, 31 attributes)",
-                "Sheet 7: Config Tables complete scan (4 tables, 88 values)"
-            ],
-            "failed_checks": []
-        }
-    }
-
-    wb.close()
-    return result

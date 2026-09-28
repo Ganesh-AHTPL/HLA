@@ -13,17 +13,19 @@ Provides:
 import io
 import csv
 import socket
+import secrets
 from datetime import datetime, timezone, timedelta
 from flask import Blueprint, request, jsonify, g, make_response
 from models import (
     db, User, Role, Permission, RolePermission, AuditLog,
-    Project, Document, ControlSchedule, ControlRunHistory, SystemSetting
+    Project, Document, ControlSchedule, ControlRunHistory, SystemSetting,
+    PasswordResetToken
 )
 from auth import (
     login_required, role_required, permission_required,
     log_audit_event, sanitize_audit_metadata
 )
-from email_service import get_smtp_config
+from email_service import get_smtp_config, send_user_welcome_setup_email, is_deliverable_email
 
 governance_bp = Blueprint("governance", __name__, url_prefix="/api/governance")
 
@@ -239,19 +241,25 @@ def list_governance_users():
 def create_governance_user():
     data = request.get_json() or {}
     username = data.get("username", "").strip()
-    password = data.get("password", "").strip()
+    explicit_password = data.get("password", "").strip()
     email = data.get("email", "").strip() or None
     role_input = data.get("role", "architect").strip().lower()
     status_input = data.get("status", "ACTIVE").strip().upper()
 
-    if not username or not password:
-        return jsonify({"error": "Username and password are required."}), 400
+    if not username:
+        return jsonify({"error": "Username is required."}), 400
+
+    if not email or not is_deliverable_email(email):
+        return jsonify({"error": "A valid deliverable corporate email address is required for user invitation and password setup."}), 400
 
     if status_input not in ["ACTIVE", "PENDING", "LOCKED", "DISABLED"]:
         return jsonify({"error": "Invalid status. Must be ACTIVE, PENDING, LOCKED, or DISABLED."}), 400
 
     if User.query.filter_by(username=username).first():
         return jsonify({"error": f"Username '{username}' already exists."}), 409
+
+    if email and User.query.filter(User.email.ilike(email)).first():
+        return jsonify({"error": f"An account with email '{email}' already exists."}), 409
 
     target_role = Role.query.filter(
         db.or_(Role.code == role_input, Role.name.ilike(role_input))
@@ -268,21 +276,60 @@ def create_governance_user():
             status=status_input,
             token_version=1
         )
-        new_user.set_password(password)
+        
+        # If admin supplied an explicit password, set it; otherwise set secure placeholder until user activates account
+        initial_pwd = explicit_password if explicit_password else secrets.token_urlsafe(32)
+        new_user.set_password(initial_pwd)
+        
         db.session.add(new_user)
+        db.session.flush()
+
+        # Generate single-use password setup / activation token (valid for 24 hours)
+        now_utc = datetime.now(timezone.utc)
+        reset_auth_token = secrets.token_urlsafe(48)
+        
+        reset_record = PasswordResetToken(
+            user_id=new_user.id,
+            verified=True,
+            verified_at=now_utc,
+            reset_token=reset_auth_token,
+            reset_token_expires_at=now_utc + timedelta(hours=24),
+            expires_at=now_utc + timedelta(hours=24),
+            used=False
+        )
+        db.session.add(reset_record)
         db.session.commit()
+
+        # Build dynamic password setup URL
+        origin = request.headers.get("Origin") or request.host_url.rstrip('/')
+        setup_link = f"{origin}/?reset_token={reset_auth_token}&username={username}&email={email}"
+
+        # Dispatch welcome onboarding email
+        email_res = send_user_welcome_setup_email(new_user, setup_link, expires_minutes=1440)
 
         log_audit_event(
             action="user.create",
             resource_type="user",
             resource_id=new_user.id,
             status="SUCCESS",
-            metadata={"username": username, "role": target_role.code, "status": status_input}
+            metadata={
+                "username": username,
+                "role": target_role.code,
+                "status": status_input,
+                "email": email,
+                "email_dispatched": email_res.get("success", False),
+                "email_status": email_res.get("status", "SIMULATED")
+            }
         )
 
+        msg = f"User '{username}' created successfully. An activation email with a password setup link has been dispatched to {email}."
+
         return jsonify({
-            "message": f"User '{username}' created successfully.",
-            "user": new_user.to_dict(include_permissions=True)
+            "message": msg,
+            "user": new_user.to_dict(include_permissions=True),
+            "setup_link": setup_link,
+            "email_dispatched": email_res.get("success", False),
+            "email_status": email_res.get("status", "SIMULATED")
         }), 201
     except Exception as e:
         db.session.rollback()

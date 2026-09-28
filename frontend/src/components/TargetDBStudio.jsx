@@ -13,7 +13,10 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
   const isViewer = currentUser?.role?.toLowerCase() === 'viewer'
   const [activeEnv, setActiveEnv] = useState('dev') // 'dev' | 'prod'
   const [selectedDocId, setSelectedDocId] = useState(documentId || (projectDocs[0]?.id || null))
-  const [codeTab, setCodeTab] = useState('ddl') // 'ddl' | 'sql' | 'pyspark' | 'reasoning'
+  const [codeTab, setCodeTab] = useState('source_details') // 'source_details' | 'ddl' | 'sql' | 'pyspark' | 'reasoning'
+  const [selectedSourceTable, setSelectedSourceTable] = useState(null)
+  const [scanError, setScanError] = useState(null)
+  const [mappingSearchText, setMappingSearchText] = useState('')
 
   // Target Database Configurations (Dev and Prod)
   const [targetConfigs, setTargetConfigs] = useState({ dev: null, prod: null })
@@ -151,11 +154,17 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
   const handleScanSourceDB = async (docIdToScan = selectedDocId) => {
     if (!docIdToScan) return
     setScanningSource(true)
+    setScanError(null)
     try {
       const res = await api.post(`/api/documents/${docIdToScan}/scan-source-db`)
       setScanResult(res.data)
+      if (res.data?.table_audit?.length > 0) {
+        setSelectedSourceTable(res.data.table_audit[0].table_name)
+      }
+      await fetchTargetArtifacts(docIdToScan)
     } catch (err) {
       console.error('Source DB scan failed:', err)
+      setScanError(err.response?.data?.error || 'Source DB scan failed. Please verify credentials and connectivity.')
     } finally {
       setScanningSource(false)
     }
@@ -171,6 +180,10 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
 
   useEffect(() => {
     if (selectedDocId) {
+      setScanResult(null)
+      setSelectedSourceTable(null)
+      setDeployResult(null)
+      setScanError(null)
       fetchTargetArtifacts(selectedDocId)
       handleScanSourceDB(selectedDocId)
     }
@@ -265,7 +278,7 @@ export default function TargetDBStudio({ projectId, documentId, projectDocs = []
       }
       const res = await api.post(`/api/projects/${projectId}/targets`, payload)
       setTestResult({ success: res.data?.success, message: res.data?.message })
-      
+
       // Update targetConfigs state immediately with returned payload
       if (res.data?.targets) {
         setTargetConfigs(res.data.targets)
@@ -515,12 +528,14 @@ schema = target_prod`
       handleScanSourceDB(selectedDocId)
       if (onRefreshProject) onRefreshProject()
 
-      if (res.data?.preview_mode) {
-        setKdbRequirementMessage('ℹ️ Target architecture generated in Preview Mode from extracted HLA logic tokens. Upload a .kdb vault or configure source DB connections for live production deployment.')
+      if (res.data?.preview_mode && !hasSourceCreds) {
+        setKdbRequirementMessage('ℹ️ Target architecture generated in Preview Mode from extracted HLA logic tokens. Configure source DB connections or upload a .kdb vault for live production deployment.')
+      } else {
+        setKdbRequirementMessage(null)
       }
     } catch (err) {
-      if (err.response?.data?.requires_kdb) {
-        setKdbRequirementMessage(err.response.data.error)
+      if (err.response?.data?.requires_kdb && !hasSourceCreds) {
+        setKdbRequirementMessage(err.response.data.error || 'Configure source DB connections or upload a .kdb vault for live production deployment.')
         setConfigMode('vault')
         setShowConfigModal(true)
       } else {
@@ -537,10 +552,18 @@ schema = target_prod`
   const handleDeployAction = async (action) => {
     if (!selectedDocId) return
 
-    if (scanResult && scanResult.tables_missing_count > 0) {
+    if (currentArtifact?.deployment_status === 'preview_only') {
       setDeployResult({
         success: false,
-        message: `Cannot ${action === 'validate' ? 'validate' : 'deploy'}: ${scanResult.tables_missing_count} upstream source table(s) not found in source database. Dry-run validation and deployment are blocked until source tables exist in the source DB.`
+        message: `Cannot ${action === 'validate' ? 'validate' : 'deploy'}: Source DB credentials or vault are not configured. Please configure source DB connections or import a .kdb vault first.`
+      })
+      return
+    }
+
+    if (hasMissingSources) {
+      setDeployResult({
+        success: false,
+        message: `Cannot ${action === 'validate' ? 'validate' : 'deploy'}: ${missingCount} upstream source table(s) not found in source database (${missingTables.map(t => t.source_schema ? `${t.source_schema}.${t.table_name}` : t.table_name).join(', ')}). Dry-run validation and deployment are strictly blocked until source tables exist in the source DB.`
       })
       return
     }
@@ -608,11 +631,22 @@ schema = target_prod`
   }
 
   const getCodeContent = () => {
-    if (!currentArtifact) return ''
-    if (codeTab === 'ddl' || codeTab === 'source_ddl') return currentArtifact.generated_ddl || currentArtifact.source_tables_ddl || ''
-    if (codeTab === 'sql') return currentArtifact.generated_transformation_sql || ''
-    if (codeTab === 'pyspark') return currentArtifact.generated_pyspark_code || ''
-    if (codeTab === 'reasoning') return currentArtifact.llm_reasoning || ''
+    if (!currentArtifact) {
+      if (building) return '-- Generating target architecture artifacts from HLA...'
+      return '-- No target artifact available. Click "Build Target Logic with LLM" to generate.'
+    }
+    if (codeTab === 'ddl' || codeTab === 'source_ddl') {
+      return currentArtifact.generated_ddl || currentArtifact.source_tables_ddl || (building ? '-- Generating Target DDL...' : '-- Target DDL not available.')
+    }
+    if (codeTab === 'sql') {
+      return currentArtifact.generated_transformation_sql || (building ? '-- Generating transformation SQL...' : '-- Transformation SQL not available.')
+    }
+    if (codeTab === 'pyspark') {
+      return currentArtifact.generated_pyspark_code || (building ? '# Generating PySpark ETL pipeline...' : '# PySpark ETL pipeline not available.')
+    }
+    if (codeTab === 'reasoning') {
+      return currentArtifact.llm_reasoning || (building ? 'Generating architectural reasoning...' : 'Architectural reasoning not available.')
+    }
     return ''
   }
 
@@ -645,6 +679,64 @@ schema = target_prod`
   }
 
   const activeDoc = projectDocs.find((d) => d.id === selectedDocId)
+
+  const activeSourceMetadata =
+    (scanResult && scanResult.table_audit && scanResult.table_audit.length > 0)
+      ? scanResult
+      : (currentArtifact?.source_metadata && currentArtifact.source_metadata.table_audit?.length > 0
+          ? currentArtifact.source_metadata
+          : (currentArtifact?.source_metadata_json && currentArtifact.source_metadata_json.table_audit?.length > 0
+              ? currentArtifact.source_metadata_json
+              : (activeDoc?.analysis_data?.last_source_scan || null)))
+
+  const activeSourceMappings =
+    (currentArtifact?.source_mapping && currentArtifact.source_mapping.length > 0)
+      ? currentArtifact.source_mapping
+      : (currentArtifact?.source_mapping_json && currentArtifact.source_mapping_json.length > 0
+          ? currentArtifact.source_mapping_json
+          : [])
+
+  const tableAuditList = activeSourceMetadata?.table_audit || []
+  const selectedTableObj = tableAuditList.find(
+    (t) => t.table_name === selectedSourceTable || t.full_table_name === selectedSourceTable
+  ) || tableAuditList[0] || null
+
+  const missingTables = tableAuditList.filter((t) => !t.table_found)
+  const missingCount = activeSourceMetadata?.tables_missing_count !== undefined
+    ? activeSourceMetadata.tables_missing_count
+    : missingTables.length
+  const hasMissingSources = missingCount > 0 || missingTables.length > 0
+
+  const sourceConns = projectConns.filter((c) => c.conn_role === 'source')
+  const isSourceVerified =
+    sourceConns.some((c) => c.status === 'connected') ||
+    activeSourceMetadata?.connection_status === 'verified'
+
+  const sourceDbDisplay =
+    activeSourceMetadata?.configured_databases?.filter(Boolean).join(', ') ||
+    sourceConns[0]?.database_name ||
+    activeDoc?.analysis_data?.sources?.[0]?.database ||
+    '—'
+
+  const rawValidatedSchemas = [
+    ...new Set(
+      tableAuditList
+        .map((t) => t.source_schema)
+        .filter(Boolean)
+    )
+  ]
+  const validatedSchemasDisplay = rawValidatedSchemas.length > 0 ? rawValidatedSchemas.join(', ') : '—'
+
+  // Diagnostic logging (Debug-safe: zero credentials/secrets)
+  useEffect(() => {
+    if (activeDoc) {
+      console.log('[HLA DOCUMENT SOURCE]', activeDoc.analysis_data?.sources || activeDoc.analysis_data?.source_tables || [])
+      console.log('[LIVE SOURCE DB]', activeSourceMetadata?.configured_databases || sourceConns.map((c) => c.database_name))
+      console.log('[SOURCE VERIFICATION]', tableAuditList)
+      console.log('[TARGET ARTIFACTS]', currentArtifact ? { env: activeEnv, status: currentArtifact.deployment_status, schema: currentArtifact.target_schema } : null)
+      console.log('[MAPPINGS]', activeSourceMappings)
+    }
+  }, [activeDoc?.id, activeSourceMetadata?.last_scanned, currentArtifact?.id, activeEnv])
 
   return (
     <div className="target-studio-container">
@@ -828,28 +920,17 @@ schema = target_prod`
 
       {/* ── Custom Source DB to Target Schema Architecture Strip ── */}
       {activeDoc?.analysis_data && (
-        <div style={{
-          margin: '0.75rem 0',
-          padding: '0.85rem 1.25rem',
-          background: 'linear-gradient(90deg, rgba(14, 25, 45, 0.9), rgba(15, 23, 42, 0.95))',
-          borderRadius: '10px',
-          border: '1px solid rgba(56, 189, 248, 0.3)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: '0.85rem'
-        }}>
+        <div className="upstream-source-banner">
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '0.74rem', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 'bold', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Upstream Source:
             </span>
             <span style={{
               padding: '4px 12px',
               borderRadius: '6px',
-              background: 'rgba(56, 189, 248, 0.12)',
-              border: '1px solid rgba(56, 189, 248, 0.35)',
-              color: '#38bdf8',
+              background: 'var(--primary-subtle)',
+              border: '1px solid var(--primary-border)',
+              color: 'var(--primary)',
               fontSize: '0.85rem',
               fontWeight: '600',
               display: 'inline-flex',
@@ -864,9 +945,9 @@ schema = target_prod`
               style={{
                 padding: '4px 12px',
                 borderRadius: '6px',
-                background: 'rgba(56, 189, 248, 0.2)',
-                border: '1px solid rgba(56, 189, 248, 0.5)',
-                color: '#e0f2fe',
+                background: 'var(--primary-subtle)',
+                border: '1px solid var(--primary-border)',
+                color: 'var(--primary)',
                 fontSize: '0.78rem',
                 fontWeight: '600',
                 cursor: 'pointer',
@@ -878,18 +959,18 @@ schema = target_prod`
             >
               {scanningSource ? '🔍 Scanning DB…' : '🔍 Scan Source Tables'}
             </button>
-            <span style={{ color: '#38bdf8', fontWeight: 'bold', fontSize: '1.15rem' }}>──▶</span>
+            <span style={{ color: 'var(--primary)', fontWeight: 'bold', fontSize: '1.15rem' }}>──▶</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <span style={{ fontSize: '0.74rem', fontWeight: 'bold', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            <span style={{ fontSize: '0.74rem', fontWeight: 'bold', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
               Target Schema:
             </span>
             <span style={{
               padding: '5px 14px',
               borderRadius: '6px',
-              background: 'rgba(16, 185, 129, 0.15)',
+              background: 'var(--success-subtle)',
               border: '1px solid rgba(16, 185, 129, 0.45)',
-              color: '#34d399',
+              color: 'var(--success)',
               fontSize: '0.9rem',
               fontWeight: '700',
               fontFamily: 'monospace'
@@ -897,7 +978,7 @@ schema = target_prod`
               🎯 "{formatSchemaString(targetForm.schema_name || activeDoc?.analysis_data?.control_overview?.target_schema)}"
             </span>
             {activeDoc?.analysis_data?.control_overview?.identification?.control_number && (
-              <span style={{ fontSize: '0.78rem', color: '#cbd5e1' }}>
+              <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
                 ({activeDoc.analysis_data.control_overview.identification.control_number})
               </span>
             )}
@@ -905,145 +986,178 @@ schema = target_prod`
         </div>
       )}
 
-      {/* ── Source DB Scan & Table Verification Inventory Card ── */}
+      {/* ── Document Source Table Verification Inventory Card ── */}
       {scanResult && scanResult.table_audit && scanResult.table_audit.length > 0 && (
-        <div style={{
-          margin: '0.75rem 0 1rem 0',
-          padding: '1rem 1.25rem',
-          background: 'rgba(15, 23, 42, 0.85)',
-          borderRadius: '10px',
-          border: '1px solid rgba(56, 189, 248, 0.25)',
-          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.25)'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.85rem', flexWrap: 'wrap', gap: '0.6rem' }}>
+        <div className="source-scan-inventory-card">
+          <div className="source-scan-header">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
               <span style={{ fontSize: '1.1rem' }}>🔎</span>
-              <div>
-                <h4 style={{ margin: 0, fontSize: '0.95rem', color: '#f8fafc', fontWeight: '600' }}>
-                  Source Database Scan & Table Verification
+              <div className="source-scan-title">
+                <h4>
+                  Document Source Table Verification
                 </h4>
-                <p style={{ margin: 0, fontSize: '0.78rem', color: '#94a3b8' }}>
-                  DDL is pulled <strong>only when table is found</strong> in source DB. Target tables are created with <strong>required columns alone</strong>.
+                <p>
+                  Physical source tables discovered from HLA document verified against respective source database connections.
                 </p>
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', flexWrap: 'wrap' }}>
               <span style={{
                 padding: '3px 10px',
                 borderRadius: '12px',
-                background: scanResult.tables_found_count > 0 ? 'rgba(34, 197, 94, 0.15)' : 'rgba(148, 163, 184, 0.15)',
-                border: scanResult.tables_found_count > 0 ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
-                color: scanResult.tables_found_count > 0 ? '#4ade80' : '#94a3b8',
+                background: scanResult.tables_found_count > 0 ? 'var(--badge-success-bg)' : 'var(--bg-surface-hover)',
+                border: scanResult.tables_found_count > 0 ? '1px solid var(--badge-success-border)' : '1px solid var(--border-primary)',
+                color: scanResult.tables_found_count > 0 ? 'var(--badge-success-text)' : 'var(--text-muted)',
                 fontSize: '0.78rem',
                 fontWeight: '600'
               }}>
-                ✓ {scanResult.tables_found_count} Found in Source DB (DDL Pulled)
+                ✓ {scanResult.tables_found_count} Table Verified (DDL Pulled)
               </span>
+              {(scanResult.connections_unconfigured_count > 0) && (
+                <span style={{
+                  padding: '3px 10px',
+                  borderRadius: '12px',
+                  background: 'rgba(234, 179, 8, 0.15)',
+                  border: '1px solid rgba(234, 179, 8, 0.4)',
+                  color: '#eab308',
+                  fontSize: '0.78rem',
+                  fontWeight: '600'
+                }}>
+                  ⚠️ {scanResult.connections_unconfigured_count} Conn Not Configured
+                </span>
+              )}
+              {(scanResult.connections_failed_count > 0) && (
+                <span style={{
+                  padding: '3px 10px',
+                  borderRadius: '12px',
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                  color: '#ef4444',
+                  fontSize: '0.78rem',
+                  fontWeight: '600'
+                }}>
+                  ❌ {scanResult.connections_failed_count} Conn Failed
+                </span>
+              )}
               {scanResult.tables_missing_count > 0 && (
                 <span style={{
                   padding: '3px 10px',
                   borderRadius: '12px',
-                  background: 'rgba(245, 158, 11, 0.12)',
-                  border: '1px solid rgba(245, 158, 11, 0.35)',
-                  color: '#fbbf24',
+                  background: 'var(--badge-warning-bg)',
+                  border: '1px solid var(--badge-warning-border)',
+                  color: 'var(--badge-warning-text)',
                   fontSize: '0.78rem',
                   fontWeight: '600'
                 }}>
-                  ⚠️ {scanResult.tables_missing_count} Not Found (DDL Omitted)
+                  ⚠️ {scanResult.tables_missing_count} Not Found / Schema Missing
                 </span>
               )}
             </div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '0.75rem' }}>
-            {scanResult.table_audit.map((t, idx) => (
-              <div key={idx} style={{
-                padding: '0.85rem 1rem',
-                borderRadius: '8px',
-                background: t.table_found ? 'rgba(34, 197, 94, 0.04)' : 'rgba(239, 68, 68, 0.05)',
-                border: t.table_found ? '1px solid rgba(34, 197, 94, 0.25)' : '1px solid rgba(239, 68, 68, 0.35)',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '0.45rem'
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
-                  <span style={{ fontFamily: 'monospace', fontWeight: '600', color: '#e2e8f0', fontSize: '0.86rem' }}>
-                    {t.source_schema ? `${t.source_schema}.${t.table_name}` : t.table_name}
-                  </span>
-                  <span style={{
-                    padding: '2px 8px',
-                    borderRadius: '4px',
-                    fontSize: '0.72rem',
-                    fontWeight: '600',
-                    background: t.table_found ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                    color: t.table_found ? '#4ade80' : '#f87171'
-                  }}>
-                    {t.table_found ? `✓ Found in ${t.found_in_db || 'Source DB'}` : '❌ Table Not Found'}
-                  </span>
-                </div>
+            {scanResult.table_audit.map((t, idx) => {
+              const isConnUnconfigured = t.connection_status === 'CONNECTION_NOT_CONFIGURED'
+              const isConnFailed = t.connection_status === 'SOURCE_CONNECTION_FAILED' || t.connection_status === 'CONNECTION_FAILED'
+              const isSchemaNotFound = t.table_status === 'SCHEMA_NOT_FOUND'
+              const isTableFound = t.table_found || t.table_status === 'TABLE_FOUND'
 
-                {t.table_found ? (
-                  <div>
-                    <div style={{ fontSize: '0.76rem', color: '#38bdf8', marginBottom: '0.3rem' }}>
-                      🎯 <strong>{t.target_required_columns_count} Required Columns</strong> created in Target (filtered from {t.source_columns_count} columns in source DB)
+              return (
+                <div key={idx} className={`source-scan-table-card ${isTableFound ? 'found' : (isConnUnconfigured ? 'unconfigured' : 'missing')}`}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.5rem' }}>
+                    <div>
+                      <span style={{ fontFamily: 'monospace', fontWeight: '700', color: 'var(--text-primary)', fontSize: '0.88rem' }}>
+                        {t.source_schema ? `${t.source_schema}.${t.table_name || t.table}` : (t.table_name || t.table)}
+                      </span>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                        System: <strong style={{ color: 'var(--text-secondary)' }}>{t.source_system || t.database || 'Default'}</strong>
+                        {t.source_id && ` (${t.source_id})`}
+                      </div>
                     </div>
-                    {t.target_required_columns && t.target_required_columns.length > 0 && (
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                        {t.target_required_columns.map((colName, cIdx) => (
-                          <span key={cIdx} style={{
-                            padding: '1px 7px',
-                            borderRadius: '3px',
-                            background: 'rgba(56, 189, 248, 0.15)',
-                            border: '1px solid rgba(56, 189, 248, 0.3)',
-                            color: '#7dd3fc',
-                            fontSize: '0.72rem',
-                            fontFamily: 'monospace'
-                          }}>
-                            {colName}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {t.source_columns_count > t.target_required_columns_count && (
-                      <div style={{ fontSize: '0.71rem', color: '#94a3b8', marginTop: '0.25rem' }}>
-                        Excluded {t.source_columns_count - t.target_required_columns_count} unused operational columns.
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '0.76rem', color: '#fca5a5' }}>
-                    ❌ <strong>Table Not Found</strong>: {t.message || `Table and schema were not found in source database.`}
-                    <div style={{ color: '#94a3b8', fontSize: '0.72rem', marginTop: '0.25rem' }}>
-                      DDL was NOT pulled. Target table creation omitted.
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'flex-end' }}>
+                      <span style={{
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        fontSize: '0.68rem',
+                        fontWeight: '600',
+                        background: isTableFound ? 'var(--badge-success-bg)' : (isConnUnconfigured ? 'rgba(234, 179, 8, 0.15)' : (isConnFailed ? 'rgba(239, 68, 68, 0.15)' : 'var(--badge-danger-bg)')),
+                        color: isTableFound ? 'var(--badge-success-text)' : (isConnUnconfigured ? '#eab308' : (isConnFailed ? '#ef4444' : 'var(--badge-danger-text)')),
+                        border: `1px solid ${isTableFound ? 'var(--badge-success-border)' : (isConnUnconfigured ? 'rgba(234, 179, 8, 0.4)' : (isConnFailed ? 'rgba(239, 68, 68, 0.4)' : 'var(--badge-danger-border)'))}`
+                      }}>
+                        {isTableFound ? `✓ Found in ${t.found_in_db || t.resolved_database || 'Source DB'}` : (isConnUnconfigured ? '⚠️ Conn Not Configured' : (isConnFailed ? '❌ Conn Failed' : (isSchemaNotFound ? '⚠️ Schema Missing' : '❌ Table Not Found')))}
+                      </span>
+                      <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)' }}>
+                        Conn: {t.connection_status === 'CONNECTION_VERIFIED' ? 'Verified' : (isConnUnconfigured ? 'Not Configured' : (isConnFailed ? 'Failed' : 'Ambiguous'))}
+                      </span>
                     </div>
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {isTableFound ? (
+                    <div>
+                      <div style={{ fontSize: '0.76rem', color: 'var(--primary)', marginBottom: '0.3rem' }}>
+                        🎯 <strong>{t.target_required_columns_count} Required Columns</strong> created in Target (filtered from {t.source_columns_count} columns in source DB)
+                      </div>
+                      {t.target_required_columns && t.target_required_columns.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                          {t.target_required_columns.map((colName, cIdx) => (
+                            <span key={cIdx} className="source-col-chip">
+                              {colName}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {t.source_columns_count > t.target_required_columns_count && (
+                        <div style={{ fontSize: '0.71rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                          Excluded {t.source_columns_count - t.target_required_columns_count} unused operational columns.
+                        </div>
+                      )}
+                    </div>
+                  ) : isConnUnconfigured ? (
+                    <div style={{ fontSize: '0.76rem', color: '#eab308' }}>
+                      ⚠️ <strong>Connection Not Configured</strong>: Source system <em>'{t.source_system}'</em> has no database connection configured.
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginTop: '0.25rem' }}>
+                        Table inspection was not performed. Configure connection in Connections tab.
+                      </div>
+                    </div>
+                  ) : isConnFailed ? (
+                    <div style={{ fontSize: '0.76rem', color: '#ef4444' }}>
+                      ❌ <strong>Connection Failed</strong>: Could not connect to source DB for <em>'{t.source_system}'</em>.
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginTop: '0.25rem' }}>
+                        {t.connection_error || 'Database connection error.'}
+                      </div>
+                    </div>
+                  ) : isSchemaNotFound ? (
+                    <div style={{ fontSize: '0.76rem', color: '#eab308' }}>
+                      ⚠️ <strong>Schema Not Found</strong>: Schema <em>'{t.source_schema}'</em> was not found in database <em>'{t.found_in_db || t.resolved_database}'</em>.
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginTop: '0.25rem' }}>
+                        Table creation omitted.
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '0.76rem', color: 'var(--danger)' }}>
+                      ❌ <strong>Table Not Found</strong>: Table <em>'{t.table_name || t.table}'</em> was not found in schema <em>'{t.source_schema}'</em> of database <em>'{t.found_in_db || t.resolved_database}'</em>.
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginTop: '0.25rem' }}>
+                        DDL was NOT pulled. Target table creation omitted.
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
 
       {/* Awaiting .kdb / Source Credentials Banner */}
       {kdbRequirementMessage && (
-        <div style={{
-          background: 'rgba(245, 158, 11, 0.08)',
-          border: '1px solid rgba(245, 158, 11, 0.4)',
-          borderRadius: '8px',
-          padding: '0.85rem 1.25rem',
-          margin: '0.8rem 0',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          color: '#fef3c7',
-          fontSize: '0.86rem',
-        }}>
-          <div>
-            <strong>⚠️ Notice: </strong>{kdbRequirementMessage}
+        <div className="notice-banner">
+          <div className="notice-content">
+            <span style={{ fontSize: '1.1rem', flexShrink: 0 }}>⚠️</span>
+            <strong className="notice-title">Notice: </strong>
+            <span className="notice-text">{kdbRequirementMessage}</span>
           </div>
           <button
-            className="btn-run-builder"
-            style={{ padding: '0.4rem 1rem', fontSize: '0.8rem' }}
+            className="btn-notice-action"
             onClick={() => {
               setVaultScope('both')
               setConfigMode('vault')
@@ -1062,7 +1176,7 @@ schema = target_prod`
           <div className="building-text-wrap">
             <span className="building-step-label">{buildStep}</span>
             <span className="building-sub">
-              Reading sources, R1–R10 cleansing filters, R11 balance dataset staging, and derived column CASE expressions.
+              Reading source metadata, HLA validation & filter rules, attribute mappings, and target data models.
             </span>
           </div>
         </div>
@@ -1077,16 +1191,23 @@ schema = target_prod`
             <div className="target-tabs-bar">
               <div className="target-tabs-left">
                 <button
+                  className={`target-tab-item ${codeTab === 'source_details' ? 'active' : ''}`}
+                  onClick={() => setCodeTab('source_details')}
+                  title="Detailed introspection of upstream source database tables, live columns, types, and source-to-target lineage mapping"
+                >
+                  <span>🔍</span> Source Table Details
+                </button>
+                <button
                   className={`target-tab-item ${codeTab === 'ddl' ? 'active' : ''}`}
                   onClick={() => setCodeTab('ddl')}
-                  title="Target tables created taking structure from source with logic columns alone"
+                  title="Target architecture DDL derived directly from HLA specification"
                 >
-                  <span>🏛️</span> Target Tables DDL (Source Structure & Logic Columns Alone)
+                  <span>🏛️</span> Target Tables DDL (HLA Target Specification)
                 </button>
                 <button
                   className={`target-tab-item ${codeTab === 'sql' ? 'active' : ''}`}
                   onClick={() => setCodeTab('sql')}
-                  title="Executable SQL transformations implementing HLA business rules R1-R15"
+                  title="Executable SQL transformations implementing HLA business rules and mappings"
                 >
                   <span>⚡</span> Transformation SQL (HLA Logic)
                 </button>
@@ -1105,21 +1226,601 @@ schema = target_prod`
               </div>
 
               <div className="target-tabs-actions">
-                <button className="btn-action-small" onClick={handleCopyCode} title="Copy code to clipboard">
-                  {copied ? '✓ Copied' : '📋 Copy'}
-                </button>
-                <button className="btn-action-small" onClick={handleDownloadCode} title="Download file">
-                  💾 Download
-                </button>
+                {codeTab === 'source_details' ? (
+                  <>
+                    <button
+                      className="btn-action-small"
+                      onClick={() => handleScanSourceDB()}
+                      disabled={scanningSource}
+                      title="Scan live source database schemas"
+                    >
+                      {scanningSource ? '⏳ Scanning…' : '🔄 Scan Source DB'}
+                    </button>
+                    <button
+                      className="btn-action-small"
+                      onClick={() => {
+                        const payloadStr = JSON.stringify(activeSourceMappings, null, 2)
+                        copyToClipboard(payloadStr).then(() => {
+                          setCopied(true)
+                          setTimeout(() => setCopied(false), 2000)
+                        })
+                      }}
+                      title="Copy source mapping JSON to clipboard"
+                    >
+                      {copied ? '✓ Copied' : '📋 Copy Lineage'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn-action-small" onClick={handleCopyCode} title="Copy code to clipboard">
+                      {copied ? '✓ Copied' : '📋 Copy'}
+                    </button>
+                    <button className="btn-action-small" onClick={handleDownloadCode} title="Download file">
+                      💾 Download
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
-            {/* Code Body */}
-            <div className="target-code-viewer">
-              <pre className="code-content-block">
-                <code>{getCodeContent()}</code>
-              </pre>
-            </div>
+            {/* Panel Body */}
+            {codeTab === 'source_details' ? (
+              <div className="source-details-panel-container">
+                {/* Source Connection Overview Card */}
+                <div className="source-details-conn-card">
+                  <div className="source-conn-header">
+                    <div className="source-conn-title-group">
+                      <span className="source-conn-icon">🔌</span>
+                      <div>
+                        <h4 className="source-conn-title">Source Database Introspection</h4>
+                        <span className="source-conn-subtitle">
+                          Live metadata discovery & schema inspection for upstream feeds
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="source-conn-actions">
+                      <button
+                        className="btn-scan-source-primary"
+                        onClick={() => handleScanSourceDB()}
+                        disabled={scanningSource}
+                        title="Scan live source database across configured schemas"
+                      >
+                        {scanningSource ? (
+                          <>
+                            <span className="spinner-inline-cyan" /> Scanning Source DB...
+                          </>
+                        ) : (
+                          <>
+                            <span>🔄</span> Scan Source Database
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="source-meta-grid">
+                    <div className="source-meta-cell">
+                      <span className="source-meta-k">Source Database</span>
+                      <span className="source-meta-v">
+                        {activeSourceMetadata?.configured_databases?.join(', ') ||
+                          sourceConns[0]?.database_name ||
+                          activeDoc?.analysis_data?.sources?.[0]?.database ||
+                          'Not Configured'}
+                      </span>
+                    </div>
+                    <div className="source-meta-cell">
+                      <span className="source-meta-k">Source Schema</span>
+                      <span className="source-meta-v">
+                        {activeSourceMetadata?.table_audit?.[0]?.source_schema ||
+                          sourceConns[0]?.schema_name ||
+                          activeDoc?.analysis_data?.sources?.[0]?.schema ||
+                          '—'}
+                      </span>
+                    </div>
+                    <div className="source-meta-cell">
+                      <span className="source-meta-k">Connection Status</span>
+                      <span className="source-meta-v">
+                        {isSourceVerified ? (
+                          <span className="badge-pill-verified">VERIFIED ✓</span>
+                        ) : hasSourceCreds ? (
+                          <span className="badge-pill-unverified" style={{ background: 'var(--badge-warning-bg)', color: 'var(--badge-warning-text)', borderColor: 'var(--badge-warning-border)' }}>SOURCE CONNECTION NOT VERIFIED</span>
+                        ) : (
+                          <span className="badge-pill-unverified">SOURCE DATABASE NOT CONFIGURED</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="source-meta-cell">
+                      <span className="source-meta-k">Last Scanned</span>
+                      <span className="source-meta-v">
+                        {activeSourceMetadata?.last_scanned || 'Not Scanned Yet'}
+                      </span>
+                    </div>
+                    <div className="source-meta-cell">
+                      <span className="source-meta-k">Tables Discovered</span>
+                      <span
+                        className="source-meta-v"
+                        style={{
+                          color:
+                            (activeSourceMetadata?.tables_missing_count || 0) > 0
+                              ? 'var(--danger)'
+                              : 'var(--success)',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {activeSourceMetadata
+                          ? `${activeSourceMetadata.tables_found_count || 0} / ${
+                              activeSourceMetadata.total_tables ||
+                              activeSourceMetadata.table_audit?.length ||
+                              0
+                            } FOUND ${
+                              (activeSourceMetadata?.tables_missing_count || 0) > 0
+                                ? `(${activeSourceMetadata.tables_missing_count} MISSING ⚠️)`
+                                : '✓'
+                            }`
+                          : '0 / 0 Scanned'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Error notification if scan failed */}
+                  {scanError && (
+                    <div className="source-scan-error-card">
+                      <div className="error-card-title">
+                        <span>⚠️</span>
+                        <strong>Current Scan Failed:</strong> {scanError}
+                      </div>
+                      <span className="error-card-sub">
+                        Previous successful scan metadata is permanently preserved below.
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* If not scanned yet or no source configured / verified */}
+                {(!activeSourceMetadata || !activeSourceMetadata.table_audit || activeSourceMetadata.table_audit.length === 0) ? (
+                  !hasSourceCreds ? (
+                    <div className="source-unscanned-card">
+                      <div className="unscanned-icon-wrap">⚠️</div>
+                      <h3>SOURCE DATABASE NOT CONFIGURED</h3>
+                      <p>
+                        No upstream source database credentials or .kdb vault have been configured. Please configure source database connections or upload a .kdb vault to enable dynamic source introspection.
+                      </p>
+                      <button
+                        className="btn-scan-source-hero"
+                        onClick={() => {
+                          setVaultScope('both')
+                          setConfigMode('vault')
+                          setShowConfigModal(true)
+                        }}
+                      >
+                        🔐 Configure Source DB / .kdb
+                      </button>
+                    </div>
+                  ) : !isSourceVerified ? (
+                    <div className="source-unscanned-card">
+                      <div className="unscanned-icon-wrap">🔌</div>
+                      <h3>SOURCE CONNECTION NOT VERIFIED</h3>
+                      <p>
+                        Source database credentials exist, but the live connection has not been verified yet. Click Scan Source Database to verify the connection and discover live tables.
+                      </p>
+                      <button
+                        className="btn-scan-source-hero"
+                        onClick={() => handleScanSourceDB()}
+                        disabled={scanningSource}
+                      >
+                        {scanningSource ? 'Verifying & Scanning Source DB...' : '🔄 [SCAN SOURCE DATABASE]'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="source-unscanned-card">
+                      <div className="unscanned-icon-wrap">🔍</div>
+                      <h3>SOURCE METADATA NOT SCANNED</h3>
+                      <p>
+                        Source database connection is verified, but schema scanning has not been executed yet. Click below to introspect real schemas, tables, columns, physical data types, and primary key constraints.
+                      </p>
+                      <button
+                        className="btn-scan-source-hero"
+                        onClick={() => handleScanSourceDB()}
+                        disabled={scanningSource}
+                      >
+                        {scanningSource ? 'Scanning Live Source Database...' : '🚀 [SCAN SOURCE DATABASE]'}
+                      </button>
+                    </div>
+                  )
+                ) : (
+                  <>
+                    {/* Document Source Table Verification Table */}
+                    <div className="source-tables-section">
+                      <div className="section-header-row">
+                        <div>
+                          <h4 className="section-title">📊 Document Source Table Verification</h4>
+                          <span className="section-subtitle">
+                            Tables required by uploaded HLA document verified against live source DB
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="table-responsive-container">
+                        <table className="source-data-table">
+                          <thead>
+                            <tr>
+                              <th>Source System</th>
+                              <th>Source Schema</th>
+                              <th>Document Source Table</th>
+                              <th>Connection Status</th>
+                              <th>Table Status</th>
+                              <th>Required Cols</th>
+                              <th>Live DB Cols</th>
+                              <th>Live Rows</th>
+                              <th>Last Scanned</th>
+                              <th>Action</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {activeSourceMetadata.table_audit.map((t, idx) => {
+                              const isSelected =
+                                (selectedTableObj?.table_name === (t.table_name || t.table)) ||
+                                (!selectedTableObj && idx === 0)
+                              const isConnUnconfigured = t.connection_status === 'CONNECTION_NOT_CONFIGURED'
+                              const isConnFailed = t.connection_status === 'SOURCE_CONNECTION_FAILED' || t.connection_status === 'CONNECTION_FAILED'
+                              const isSchemaNotFound = t.table_status === 'SCHEMA_NOT_FOUND'
+                              const isTableFound = t.table_found || t.table_status === 'TABLE_FOUND'
+
+                              return (
+                                <tr
+                                  key={idx}
+                                  className={isSelected ? 'row-selected' : ''}
+                                  onClick={() => setSelectedSourceTable(t.table_name || t.table)}
+                                  style={{ cursor: 'pointer' }}
+                                >
+                                  <td>
+                                    <span style={{ fontSize: '0.8rem', fontWeight: '600', color: 'var(--text-secondary)' }}>
+                                      {t.source_system || t.database || 'Default'}
+                                    </span>
+                                    {t.source_id && (
+                                      <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginLeft: '4px' }}>
+                                        ({t.source_id})
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <span className="font-mono text-muted">
+                                      {t.source_schema || t.schema || '—'}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <strong className="font-mono table-name-highlight">
+                                      {t.table_name || t.table}
+                                    </strong>
+                                  </td>
+                                  <td>
+                                    <span
+                                      className={`badge-status-pill ${
+                                        t.connection_status === 'CONNECTION_VERIFIED' ? 'found' : (isConnUnconfigured ? 'ambiguous' : 'missing')
+                                      }`}
+                                    >
+                                      {t.connection_status === 'CONNECTION_VERIFIED' ? '✓ VERIFIED' : (isConnUnconfigured ? '⚠️ NOT CONFIG' : (isConnFailed ? '❌ FAILED' : '⚠️ AMBIGUOUS'))}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <span
+                                      className={`badge-status-pill ${
+                                        isTableFound ? 'found' : (isSchemaNotFound ? 'ambiguous' : (isConnUnconfigured || isConnFailed ? 'text-muted' : 'missing'))
+                                      }`}
+                                    >
+                                      {isTableFound ? 'FOUND ✓' : (isSchemaNotFound ? 'SCHEMA MISSING ⚠️' : (isConnUnconfigured || isConnFailed ? 'NOT CHECKED ⚪' : 'NOT FOUND ❌'))}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <span className="badge-count" style={{ background: 'var(--primary-subtle)', color: 'var(--primary)', borderColor: 'var(--primary-border)' }}>
+                                      {t.target_required_columns_count || (t.target_required_columns?.length) || 0}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    {isTableFound ? (
+                                      <span className="badge-count">
+                                        {t.columns?.length || t.source_columns_count || 0}
+                                      </span>
+                                    ) : (
+                                      <span className="text-muted">—</span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <span className="font-mono text-muted">
+                                      {isTableFound && t.row_count !== undefined && t.row_count !== null
+                                        ? t.row_count.toLocaleString()
+                                        : '—'}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <span className="text-muted" style={{ fontSize: '0.78rem' }}>
+                                      {t.last_scanned || activeSourceMetadata.last_scanned || '—'}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    <button
+                                      className={`btn-table-action-small ${
+                                        isSelected ? 'active' : ''
+                                      }`}
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setSelectedSourceTable(t.table_name || t.table)
+                                      }}
+                                    >
+                                      {isSelected ? '✓ Viewing' : 'Inspect'}
+                                    </button>
+                                  </td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* Selected Source Table Inspector */}
+                    {selectedTableObj && (
+                      <div className="source-columns-detail-card">
+                        <div className="detail-card-header">
+                          <div className="detail-header-left">
+                            <span className="table-badge-icon">🗃️</span>
+                            <div>
+                              <h4 className="detail-card-title">
+                                SOURCE TABLE:{' '}
+                                <span className="font-mono">
+                                  {selectedTableObj.source_schema ? `${selectedTableObj.source_schema}.${selectedTableObj.table_name || selectedTableObj.table}` : (selectedTableObj.table_name || selectedTableObj.table)}
+                                </span>
+                              </h4>
+                              <span className="detail-card-subtitle">
+                                Source System: <strong>{selectedTableObj.source_system || selectedTableObj.database || 'Default'}</strong>
+                                {selectedTableObj.source_id && ` | Source ID: ${selectedTableObj.source_id}`}
+                                {selectedTableObj.found_in_db && ` | Resolved DB: ${selectedTableObj.found_in_db}`}
+                              </span>
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <span
+                              className={`badge-status-pill ${
+                                selectedTableObj.connection_status === 'CONNECTION_VERIFIED' ? 'found' : (selectedTableObj.connection_status === 'CONNECTION_NOT_CONFIGURED' ? 'ambiguous' : 'missing')
+                              }`}
+                            >
+                              CONN: {selectedTableObj.connection_status === 'CONNECTION_VERIFIED' ? 'VERIFIED ✓' : (selectedTableObj.connection_status === 'CONNECTION_NOT_CONFIGURED' ? 'NOT CONFIG ⚠️' : 'FAILED ❌')}
+                            </span>
+                            <span
+                              className={`badge-status-pill ${
+                                selectedTableObj.table_found || selectedTableObj.table_status === 'TABLE_FOUND' ? 'found' : (selectedTableObj.table_status === 'SCHEMA_NOT_FOUND' ? 'ambiguous' : (selectedTableObj.table_status === 'NOT_CHECKED' ? 'text-muted' : 'missing'))
+                              }`}
+                            >
+                              TABLE: {selectedTableObj.table_found || selectedTableObj.table_status === 'TABLE_FOUND' ? 'FOUND ✓' : (selectedTableObj.table_status === 'SCHEMA_NOT_FOUND' ? 'SCHEMA MISSING ⚠️' : (selectedTableObj.table_status === 'NOT_CHECKED' ? 'NOT CHECKED ⚪' : 'NOT FOUND ❌'))}
+                            </span>
+                          </div>
+                        </div>
+
+                        {selectedTableObj.table_found || selectedTableObj.table_status === 'TABLE_FOUND' ? (
+                          <div className="table-responsive-container">
+                            <table className="source-data-table columns-table">
+                              <thead>
+                                <tr>
+                                  <th>Column</th>
+                                  <th>Data Type</th>
+                                  <th>Nullable</th>
+                                  <th>PK</th>
+                                  <th>Source</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(selectedTableObj.columns || []).map((col, cIdx) => (
+                                  <tr key={cIdx}>
+                                    <td>
+                                      <strong className="font-mono text-primary-col">
+                                        {col.name || col.column_name}
+                                      </strong>
+                                    </td>
+                                    <td>
+                                      <span className="badge-datatype">
+                                        {col.data_type || 'VARCHAR'}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <span
+                                        className={`badge-nullable ${
+                                          (col.nullable === 'NO' || col.is_nullable === 'NO')
+                                            ? 'not-null'
+                                            : 'nullable'
+                                        }`}
+                                      >
+                                        {(col.nullable === 'NO' || col.is_nullable === 'NO')
+                                          ? 'NO'
+                                          : 'YES'}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      {(col.is_pk || col.primary_key) ? (
+                                        <span className="badge-pk-pill">YES</span>
+                                      ) : (
+                                        <span className="text-muted">NO</span>
+                                      )}
+                                    </td>
+                                    <td>
+                                      <span className="badge-source-live">
+                                        {col.source || 'LIVE DB'}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : selectedTableObj.connection_status === 'CONNECTION_NOT_CONFIGURED' ? (
+                          <div className="table-missing-diagnostic" style={{ borderLeftColor: '#eab308' }}>
+                            <div className="diagnostic-header">
+                              <span>⚠️</span>
+                              <strong style={{ color: '#eab308' }}>Source Database Connection Not Configured</strong>
+                            </div>
+                            <p className="diagnostic-msg">
+                              Source system <strong>'{selectedTableObj.source_system}'</strong> (Source ID: {selectedTableObj.source_id || 'N/A'}) does not have a database connection configured.
+                            </p>
+                            <span className="diagnostic-note">
+                              Table inspection was NOT performed because no source connection exists. Configure connection credentials in the Connections tab to verify this physical source table.
+                            </span>
+                          </div>
+                        ) : selectedTableObj.connection_status === 'SOURCE_CONNECTION_FAILED' || selectedTableObj.connection_status === 'CONNECTION_FAILED' ? (
+                          <div className="table-missing-diagnostic">
+                            <div className="diagnostic-header">
+                              <span>❌</span>
+                              <strong style={{ color: '#ef4444' }}>Source Database Connection Failed</strong>
+                            </div>
+                            <p className="diagnostic-msg">
+                              Could not establish connection to source database for system <strong>'{selectedTableObj.source_system}'</strong>: {selectedTableObj.connection_error || 'Connection failed.'}
+                            </p>
+                            <span className="diagnostic-note">
+                              Table inspection was NOT performed due to connection failure.
+                            </span>
+                          </div>
+                        ) : selectedTableObj.table_status === 'SCHEMA_NOT_FOUND' ? (
+                          <div className="table-missing-diagnostic" style={{ borderLeftColor: '#eab308' }}>
+                            <div className="diagnostic-header">
+                              <span>⚠️</span>
+                              <strong style={{ color: '#eab308' }}>Schema Not Found in Source Database</strong>
+                            </div>
+                            <p className="diagnostic-msg">
+                              Schema <strong>'{selectedTableObj.source_schema}'</strong> was not found in source database <strong>'{selectedTableObj.found_in_db || selectedTableObj.resolved_database}'</strong>.
+                            </p>
+                            <span className="diagnostic-note">
+                              Target DDL creation will be omitted for this table until the schema exists in the source database.
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="table-missing-diagnostic">
+                            <div className="diagnostic-header">
+                              <span>❌</span>
+                              <strong>Table Not Found in Source Database</strong>
+                            </div>
+                            <p className="diagnostic-msg">
+                              {selectedTableObj.message ||
+                                (selectedTableObj.source_schema
+                                  ? `Table '${selectedTableObj.table_name || selectedTableObj.table}' with schema '${selectedTableObj.source_schema}' was not found in database '${selectedTableObj.found_in_db || selectedTableObj.resolved_database}'.`
+                                  : `Table '${selectedTableObj.table_name || selectedTableObj.table}' was not found across accessible source database schemas.`)}
+                            </p>
+                            <span className="diagnostic-note">
+                              Target DDL creation will be omitted for this table until it exists in the source database.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Source -> Target Mapping Lineage Section */}
+                    <div className="source-mapping-section">
+                      <div className="section-header-row">
+                        <div>
+                          <h4 className="section-title">🔗 SOURCE → TARGET MAPPING</h4>
+                          <span className="section-subtitle">
+                            Field-level lineage between upstream source tables and generated target entities
+                          </span>
+                        </div>
+                        <div className="mapping-search-wrap">
+                          <input
+                            type="text"
+                            placeholder="🔍 Filter mappings (e.g. order_id, status)..."
+                            value={mappingSearchText}
+                            onChange={(e) => setMappingSearchText(e.target.value)}
+                            className="mapping-search-input"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="table-responsive-container">
+                        <table className="source-data-table mapping-table">
+                          <thead>
+                            <tr>
+                              <th>Source Table</th>
+                              <th>Source Column</th>
+                              <th>Transformation</th>
+                              <th>Target Table</th>
+                              <th>Target Column</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {activeSourceMappings
+                              .filter((m) => {
+                                if (!mappingSearchText.trim()) return true
+                                const q = mappingSearchText.toLowerCase()
+                                return (
+                                  (m.source_table || '').toLowerCase().includes(q) ||
+                                  (m.source_column || '').toLowerCase().includes(q) ||
+                                  (m.transformation || '').toLowerCase().includes(q) ||
+                                  (m.target_table || '').toLowerCase().includes(q) ||
+                                  (m.target_column || '').toLowerCase().includes(q)
+                                )
+                              })
+                              .map((m, mIdx) => {
+                                const isUnmapped =
+                                  m.source_column === 'UNMAPPED' ||
+                                  m.transformation === 'UNMAPPED'
+                                const isDirect = m.transformation === 'direct'
+                                return (
+                                  <tr key={mIdx}>
+                                    <td>
+                                      <span className="font-mono text-muted">
+                                        {m.source_table || 'source_feed'}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      {m.source_column === 'UNMAPPED' ? (
+                                        <span className="badge-unmapped">UNMAPPED</span>
+                                      ) : (
+                                        <strong className="font-mono text-primary-col">
+                                          {m.source_column}
+                                        </strong>
+                                      )}
+                                    </td>
+                                    <td>
+                                      {isUnmapped ? (
+                                        <span className="badge-unmapped">UNMAPPED</span>
+                                      ) : isDirect ? (
+                                        <span className="badge-direct">direct</span>
+                                      ) : (
+                                        <code className="transformation-code">
+                                          {m.transformation}
+                                        </code>
+                                      )}
+                                    </td>
+                                    <td>
+                                      <span className="font-mono text-target-table">
+                                        {m.target_table}
+                                      </span>
+                                    </td>
+                                    <td>
+                                      <strong className="font-mono text-target-col">
+                                        {m.target_column}
+                                      </strong>
+                                    </td>
+                                  </tr>
+                                )
+                              })}
+                            {activeSourceMappings.length === 0 && (
+                              <tr>
+                                <td colSpan={5} style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-muted)' }}>
+                                  No field mappings generated yet. Click "Build Target Logic with LLM" to generate full field-level lineage.
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="target-code-viewer">
+                <pre className="code-content-block">
+                  <code>{getCodeContent()}</code>
+                </pre>
+              </div>
+            )}
           </div>
 
           {/* Right: Deployment & Verification Control Center */}
@@ -1136,8 +1837,8 @@ schema = target_prod`
               <div className="deploy-meta-grid">
                 <div className="deploy-meta-cell">
                   <span className="meta-k">Source Status</span>
-                  <span className="meta-v" style={{ color: (scanResult && scanResult.tables_missing_count > 0) ? '#f87171' : 'var(--cyan-400)' }}>
-                    {(scanResult && scanResult.tables_missing_count > 0) ? 'Sources Missing ⚠️' : 'Sources Verified ✓'}
+                  <span className="meta-v" style={{ color: hasMissingSources ? '#dc2626' : 'var(--success, #16a34a)', fontWeight: 700 }}>
+                    {hasMissingSources ? 'Sources Missing ⚠️' : 'Sources Verified ✓'}
                   </span>
                 </div>
                 <div className="deploy-meta-cell">
@@ -1157,38 +1858,31 @@ schema = target_prod`
               </div>
 
               {/* Missing Sources Warning Banner & Quality Gate Details */}
-              {scanResult && scanResult.tables_missing_count > 0 && (
-                <div style={{
-                  margin: '0.75rem 0',
-                  padding: '0.85rem 1rem',
-                  borderRadius: '8px',
-                  background: 'rgba(239, 68, 68, 0.1)',
-                  border: '1px solid rgba(239, 68, 68, 0.35)',
-                  color: '#fca5a5',
-                  fontSize: '0.78rem',
-                  lineHeight: 1.45
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontWeight: 800, color: '#ef4444', marginBottom: '0.35rem', fontSize: '0.84rem' }}>
-                    <span>⛔</span> Quality Gate: Upstream Sources Missing ({scanResult.tables_missing_count})
+              {hasMissingSources && (
+                <div className="quality-gate-warning-card">
+                  <div className="quality-gate-header">
+                    <span>⛔</span> Quality Gate: Upstream Sources Missing ({missingCount})
                   </div>
-                  <div style={{ color: '#fca5a5', marginBottom: '0.5rem' }}>
+                  <div className="quality-gate-sub">
                     Dry-Run Validation and Target Deployment are strictly <strong>blocked</strong> until upstream source tables exist in the source database.
                   </div>
-                  <div style={{ background: 'rgba(0,0,0,0.35)', padding: '0.55rem 0.75rem', borderRadius: '6px', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-                    <div style={{ marginBottom: '0.2rem' }}>
-                      <strong style={{ color: '#93c5fd' }}>Source Database:</strong> {scanResult.configured_databases?.join(', ') || 'hla (hla_db)'}
+                  <div className="quality-gate-meta-box">
+                    <div className="quality-gate-meta-row">
+                      <span className="quality-gate-meta-label">Source Database:</span>
+                      <span className="quality-gate-meta-value">{sourceDbDisplay}</span>
                     </div>
-                    <div style={{ marginBottom: '0.35rem' }}>
-                      <strong style={{ color: '#93c5fd' }}>Validated Schemas:</strong> {[...new Set(scanResult.table_audit?.map((t) => t.source_schema || 'public'))].join(', ') || 'public'}
+                    <div className="quality-gate-meta-row">
+                      <span className="quality-gate-meta-label">Validated Schema:</span>
+                      <span className="quality-gate-meta-value">{validatedSchemasDisplay}</span>
                     </div>
-                    <div style={{ color: '#f87171', fontWeight: 700, marginBottom: '0.25rem' }}>Missing Source Objects:</div>
-                    <ul style={{ margin: 0, paddingLeft: '1.2rem', color: '#cbd5e1' }}>
-                      {scanResult.table_audit?.filter((t) => !t.table_found).map((t) => (
-                        <li key={t.table_name} style={{ marginBottom: '0.15rem' }}>
-                          <code style={{ color: '#fca5a5', fontWeight: 600 }}>
-                            {t.source_schema ? `${t.source_schema}.${t.table_name}` : t.table_name}
-                          </code>
-                          {t.source_system ? <span style={{ color: '#94a3b8', marginLeft: '0.4rem' }}>({t.source_system})</span> : null}
+                  </div>
+                  <div className="quality-gate-missing-title">Missing Source Objects</div>
+                  <div className="quality-gate-missing-container">
+                    <ul className="quality-gate-missing-list">
+                      {missingTables.map((t) => (
+                        <li key={t.table_name} className="quality-gate-missing-item">
+                          <code>{t.source_schema ? `${t.source_schema}.${t.table_name}` : t.table_name}</code>
+                          {t.source_system ? <span style={{ color: '#64748b', fontSize: '0.74rem', marginLeft: '0.4rem', fontWeight: 500 }}>({t.source_system})</span> : null}
                         </li>
                       ))}
                     </ul>
@@ -1203,8 +1897,8 @@ schema = target_prod`
                     <button
                       className="btn-validate"
                       onClick={() => handleDeployAction('validate')}
-                      disabled={deploying || (scanResult && scanResult.tables_missing_count > 0)}
-                      title={scanResult && scanResult.tables_missing_count > 0 ? "Blocked: Upstream source tables not found in source database" : "Test DDL syntax in rollback transaction"}
+                      disabled={deploying || currentArtifact.deployment_status === 'preview_only' || currentArtifact.deployment_status === 'blocked' || hasMissingSources}
+                      title={currentArtifact.deployment_status === 'preview_only' ? "Blocked: Source DB credentials or vault not configured" : hasMissingSources || currentArtifact.deployment_status === 'blocked' ? `Blocked: ${missingCount} upstream source table(s) not found in source database` : "Test DDL syntax in rollback transaction"}
                     >
                       <span>🧪</span> {deploying && deployAction === 'validate' ? 'Validating…' : 'Validate & Dry-Run'}
                     </button>
@@ -1212,8 +1906,8 @@ schema = target_prod`
                     <button
                       className={`btn-deploy-live ${activeEnv === 'prod' ? 'prod' : 'dev'}`}
                       onClick={() => handleDeployAction('deploy')}
-                      disabled={deploying || (scanResult && scanResult.tables_missing_count > 0)}
-                      title={scanResult && scanResult.tables_missing_count > 0 ? "Blocked: Upstream source tables not found in source database" : "Deploy tables into target database"}
+                      disabled={deploying || currentArtifact.deployment_status === 'preview_only' || currentArtifact.deployment_status === 'blocked' || hasMissingSources}
+                      title={currentArtifact.deployment_status === 'preview_only' ? "Blocked: Source DB credentials or vault not configured" : hasMissingSources || currentArtifact.deployment_status === 'blocked' ? `Blocked: ${missingCount} upstream source table(s) not found in source database` : "Deploy tables into target database"}
                     >
                       <span>🚀</span> {deploying && deployAction === 'deploy' ? 'Deploying Tables…' : 'Deploy to Target'}
                     </button>
@@ -1221,27 +1915,10 @@ schema = target_prod`
 
                   <button
                     type="button"
+                    className="btn-repair-tables"
                     onClick={() => {
                       setShowMigrationModal(true)
                       handleRunSchemaMigration('preview')
-                    }}
-                    style={{
-                      width: '100%',
-                      marginTop: '0.55rem',
-                      padding: '0.45rem 0.8rem',
-                      background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(168, 85, 247, 0.15) 100%)',
-                      border: '1px solid rgba(139, 92, 246, 0.4)',
-                      borderRadius: '6px',
-                      color: '#c4b5fd',
-                      fontWeight: 700,
-                      fontSize: '0.78rem',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '0.45rem',
-                      transition: 'all 0.2s ease',
-                      boxShadow: '0 2px 6px rgba(0,0,0,0.2)'
                     }}
                     title="Discover generated tables, remove unwanted generic columns, and rebuild tables with correct column order and zero data loss"
                   >
@@ -1284,9 +1961,9 @@ schema = target_prod`
                         </div>
                         {deployResult.stages.map((stage, idx) => {
                           const isError = stage.status === 'error'
-                          const isWarn  = stage.status === 'warning'
-                          const color   = isError ? '#f87171' : isWarn ? '#fbbf24' : '#86efac'
-                          const icon    = isError ? '✕' : isWarn ? '⚠' : '✓'
+                          const isWarn = stage.status === 'warning'
+                          const color = isError ? '#f87171' : isWarn ? '#fbbf24' : '#86efac'
+                          const icon = isError ? '✕' : isWarn ? '⚠' : '✓'
                           return (
                             <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: '0.45rem', fontSize: '0.78rem', padding: '0.12rem 0', color }}>
                               <span style={{ flexShrink: 0, fontWeight: 700 }}>{icon}</span>
@@ -1302,10 +1979,10 @@ schema = target_prod`
 
                     {/* ── Object Reconciliation Table ── */}
                     {deployResult.reconciliation && Object.keys(deployResult.reconciliation.objects || {}).length > 0 && (() => {
-                      const recon   = deployResult.reconciliation
-                      const counts  = recon.counts || {}
+                      const recon = deployResult.reconciliation
+                      const counts = recon.counts || {}
                       const objects = recon.objects || {}
-                      const STATUS_ICON  = { EXISTING: '✓', CREATED: '+', ALTERED: '↑', FAILED: '✗', INVALID: '✗', MISSING: '○', DIFFERENT: '↑' }
+                      const STATUS_ICON = { EXISTING: '✓', CREATED: '+', ALTERED: '↑', FAILED: '✗', INVALID: '✗', MISSING: '○', DIFFERENT: '↑' }
                       const STATUS_COLOR = { EXISTING: '#86efac', CREATED: '#93c5fd', ALTERED: '#fbbf24', FAILED: '#f87171', INVALID: '#f87171', MISSING: '#94a3b8', DIFFERENT: '#fbbf24' }
                       return (
                         <div style={{ marginTop: '0.8rem', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: '0.7rem' }}>
@@ -1313,11 +1990,11 @@ schema = target_prod`
                           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.55rem', flexWrap: 'wrap' }}>
                             <span style={{ color: 'var(--cyan-400)', fontWeight: 700, fontSize: '0.72rem', letterSpacing: '0.06em', textTransform: 'uppercase', marginRight: '0.3rem' }}>Object Reconciliation</span>
                             {[
-                              { label: `✓ Reused: ${counts.existing  || 0}`, color: '#86efac' },
-                              { label: `+ Created: ${counts.missing   || 0}`, color: '#93c5fd' },
+                              { label: `✓ Reused: ${counts.existing || 0}`, color: '#86efac' },
+                              { label: `+ Created: ${counts.created !== undefined ? counts.created : (counts.missing || 0)}`, color: '#93c5fd' },
                               { label: `↑ Altered: ${counts.altered !== undefined ? counts.altered : (counts.different || 0)}`, color: '#fbbf24' },
                               ...(counts.failed ? [{ label: `✗ Failed: ${counts.failed}`, color: '#f87171' }] : []),
-                              { label: `✗ Invalid: ${counts.invalid   || 0}`, color: '#f87171' },
+                              { label: `✗ Invalid: ${counts.invalid || 0}`, color: '#f87171' },
                             ].map(b => (
                               <span key={b.label} style={{ fontSize: '0.68rem', padding: '0.15rem 0.45rem', borderRadius: '4px', background: 'rgba(255,255,255,0.06)', color: b.color, fontWeight: 600 }}>
                                 {b.label}
@@ -1345,17 +2022,27 @@ schema = target_prod`
                               </thead>
                               <tbody>
                                 {Object.entries(objects).map(([objName, objInfo]) => {
-                                  const st     = objInfo.status || 'MISSING'
-                                  const color  = STATUS_COLOR[st] || '#94a3b8'
-                                  const icon   = STATUS_ICON[st]  || '○'
-                                  const nMiss  = (objInfo.missing_columns  || []).length
+                                  const st = objInfo.status || 'MISSING'
+                                  const color = STATUS_COLOR[st] || '#94a3b8'
+                                  const icon = STATUS_ICON[st] || '○'
+                                  const nMiss = (objInfo.missing_columns || []).length
                                   const nConfl = (objInfo.conflict_columns || []).length
-                                  let detail   = ''
-                                  if (objInfo.proposed_action)               detail = objInfo.proposed_action
-                                  else if (st === 'FAILED')                  detail = `Reconciliation/ALTER failed`
-                                  else if (st === 'ALTERED' || st === 'DIFFERENT') detail = `${nMiss} col(s) added`
-                                  else if (st === 'INVALID')                  detail = `${nConfl} type conflict(s) — manual fix required`
-                                  else if (st === 'CREATED' || st === 'MISSING') detail = `${nMiss} col(s) provisioned`
+                                  let detail = ''
+                                  if (objInfo.row_count !== undefined) {
+                                    detail = `${st === 'CREATED' ? 'Created' : 'Reused'} (${Number(objInfo.row_count).toLocaleString()} rows)`
+                                  } else if (objInfo.proposed_action) {
+                                    detail = objInfo.proposed_action
+                                  } else if (st === 'FAILED') {
+                                    detail = `Reconciliation/ALTER failed`
+                                  } else if (st === 'ALTERED' || st === 'DIFFERENT') {
+                                    detail = `${nMiss} col(s) added`
+                                  } else if (st === 'INVALID') {
+                                    detail = `${nConfl} type conflict(s) — manual fix required`
+                                  } else if (st === 'CREATED' || st === 'MISSING') {
+                                    detail = `${nMiss} col(s) provisioned`
+                                  } else if (st === 'EXISTING') {
+                                    detail = `Reused (compatible)`
+                                  }
                                   return (
                                     <tr key={objName} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
                                       <td style={{ padding: '0.18rem 0.5rem', fontFamily: 'var(--font-mono)', color: '#cbd5e1', maxWidth: '260px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={objName}>
@@ -1439,7 +2126,7 @@ schema = target_prod`
         !hasSourceCreds ? (
           <div className="target-empty-card" style={{ borderColor: 'rgba(245, 158, 11, 0.4)', background: 'rgba(245, 158, 11, 0.03)' }}>
             <span style={{ fontSize: '2.8rem', display: 'block', marginBottom: '0.8rem' }}>🔐</span>
-            <h3 style={{ color: '#ffffff', fontSize: '1.25rem', marginBottom: '0.5rem' }}>
+            <h3 style={{ color: 'var(--text-primary)', fontSize: '1.25rem', marginBottom: '0.5rem' }}>
               Step 2: Insert DB Credentials or Upload .kdb Vault File
             </h3>
             <p style={{ color: 'var(--text-dim)', maxWidth: '640px', margin: '0 auto 1.25rem', fontSize: '0.88rem', lineHeight: 1.6 }}>
@@ -1476,7 +2163,7 @@ schema = target_prod`
         ) : (
           <div className="target-empty-card">
             <span style={{ fontSize: '2.8rem', display: 'block', marginBottom: '0.8rem' }}>⚡</span>
-            <h3 style={{ color: '#ffffff', fontSize: '1.25rem', marginBottom: '0.5rem' }}>
+            <h3 style={{ color: 'var(--text-primary)', fontSize: '1.25rem', marginBottom: '0.5rem' }}>
               Source Credentials Verified • Ready to Create Target Tables
             </h3>
             <p style={{ color: 'var(--text-dim)', maxWidth: '600px', margin: '0 auto 1.25rem', fontSize: '0.86rem', lineHeight: 1.5 }}>
@@ -1870,7 +2557,7 @@ schema = target_prod`
                     <label htmlFor="target-vault-file-input" className="vault-drop-label" style={{ gap: '0.65rem' }}>
                       <span style={{ fontSize: '1.4rem' }}>📁</span>
                       <div>
-                        <span style={{ color: '#ffffff', fontWeight: 700, fontSize: '0.85rem' }}>
+                        <span style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: '0.85rem' }}>
                           {vaultFile ? vaultFile.name : 'Choose a Target .kdb / Vault file or drag & drop'}
                         </span>
                         <span style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-muted)' }}>

@@ -704,7 +704,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                           {run.status}
                         </span>
                       </td>
-                      <td style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>
+                      <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                         {formatDateTime(run.started_at)}
                       </td>
                       <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}>
@@ -1047,7 +1047,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                   <label style={{ margin: 0, color: '#f87171', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.94rem' }}>
                     <span>🚨</span> Automatic Email Alerts on Failure
                   </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', fontSize: '0.88rem', color: '#e2e8f0', margin: 0 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', cursor: 'pointer', fontSize: '0.88rem', color: 'var(--text-secondary)', margin: 0 }}>
                     <input
                       type="checkbox"
                       checked={formData.notify_on_failure !== false}
@@ -1090,7 +1090,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
                 <span style={{ fontSize: '1.4rem' }}>⚡</span>
                 <div>
-                  <h3 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700, color: '#ffffff' }}>
+                  <h3 style={{ margin: 0, fontSize: '1.35rem', fontWeight: 700, color: 'var(--text-primary)' }}>
                     Run Control Manually
                   </h3>
                   <p style={{ margin: '0.2rem 0 0 0', fontSize: '0.88rem', color: 'var(--text-muted)' }}>
@@ -1167,7 +1167,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
                 />
               </div>
 
-              <div style={{ padding: '0.85rem 1rem', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: '8px', fontSize: '0.88rem', color: '#bae6fd', lineHeight: 1.5 }}>
+              <div style={{ padding: '0.85rem 1rem', background: 'var(--primary-subtle)', border: '1px solid var(--primary-border)', borderRadius: '8px', fontSize: '0.88rem', color: 'var(--primary)', lineHeight: 1.5 }}>
                 ℹ️ <strong>Quality Gate Reminder:</strong> The control run strictly requires valid source database connections and available source tables. If source DB info is missing or tables are not found, the run will fail and trigger an automated failure alert.
               </div>
 
@@ -1191,7 +1191,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
             <div className="modal-header">
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
                 <span className="ctrl-badge">{selectedRunLog.control_number}</span>
-                <h3 style={{ margin: 0, fontSize: '1.3rem', fontWeight: 700, color: '#ffffff' }}>
+                <h3 style={{ margin: 0, fontSize: '1.3rem', fontWeight: 700, color: 'var(--text-primary)' }}>
                   Execution Run #{selectedRunLog.id} Audit Log
                 </h3>
                 <span className={getStatusBadgeClass(selectedRunLog.status)}>
@@ -1204,7 +1204,7 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
             <div className="log-meta-bar" style={{ fontSize: '0.92rem' }}>
               <div><strong>Started:</strong> {formatDateTime(selectedRunLog.started_at)}</div>
               <div><strong>Duration:</strong> {selectedRunLog.duration_seconds}s</div>
-              <div><strong>Hostname:</strong> <span style={{ color: '#38bdf8' }}>{selectedRunLog.hostname || 'Not Provided'}</span></div>
+              <div><strong>Hostname:</strong> <span style={{ color: 'var(--primary)' }}>{selectedRunLog.hostname || 'Not Provided'}</span></div>
               <div><strong>Trigger:</strong> {selectedRunLog.trigger_type}</div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                 <strong>Target Env:</strong>
@@ -1225,8 +1225,8 @@ export default function ControlScheduler({ projectId, projectDocs = [], currentU
               <div className="log-smtp-banner success">
                 <span style={{ fontSize: '1.5rem' }}>📧</span>
                 <div style={{ flex: 1 }}>
-                  <strong style={{ fontSize: '1.02rem', color: '#34d399' }}>Automated Failure Alert Dispatched:</strong>{' '}
-                  <span style={{ color: '#e2e8f0', fontSize: '0.96rem' }}>
+                  <strong style={{ fontSize: '1.02rem', color: 'var(--success)' }}>Automated Failure Alert Dispatched:</strong>{' '}
+                  <span style={{ color: 'var(--text-secondary)', fontSize: '0.96rem' }}>
                     Triggered to {selectedRunLog.result_details?.email_alert?.recipients?.join(', ') || primaryAlertEmail} with full audit diagnostics.
                   </span>
                 </div>

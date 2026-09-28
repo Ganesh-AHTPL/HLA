@@ -76,6 +76,7 @@ print(f"Generated transformation SQL length: {len(transform_sql)} chars")
 is_valid, msg, diags = validate_transformation_pipeline_against_schema(
     target_cfg,
     transform_sql,
+    ddl_script=ddl,
     strict_not_null=False
 )
 

@@ -21,7 +21,6 @@ export default function UsersTab({
   // Provision modal state
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [newUsername, setNewUsername] = useState('')
-  const [newPassword, setNewPassword] = useState('')
   const [newEmail, setNewEmail] = useState('')
   const [newRole, setNewRole] = useState('architect')
   const [newStatus, setNewStatus] = useState('ACTIVE')
@@ -87,21 +86,22 @@ export default function UsersTab({
 
   const handleCreateUser = async (e) => {
     e.preventDefault()
-    if (!newUsername.trim() || !newPassword.trim()) return
+    if (!newUsername.trim() || !newEmail.trim()) {
+      onNotify('Username and Corporate Email are required.', 'error')
+      return
+    }
 
     setCreating(true)
     try {
       const res = await axios.post('/api/governance/users', {
         username: newUsername.trim(),
-        password: newPassword.trim(),
-        email: newEmail.trim() || undefined,
+        email: newEmail.trim(),
         role: newRole,
         status: newStatus
       })
-      onNotify(res.data?.message || 'User account provisioned successfully.', 'success')
+      onNotify(res.data?.message || 'User account provisioned! Invitation email sent.', 'success')
       setShowCreateModal(false)
       setNewUsername('')
-      setNewPassword('')
       setNewEmail('')
       setNewRole('architect')
       setNewStatus('ACTIVE')
@@ -503,20 +503,7 @@ export default function UsersTab({
                 </div>
 
                 <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.35rem' }}>Initial Password *</label>
-                  <input
-                    type="password"
-                    className="gov-search-input"
-                    style={{ width: '100%' }}
-                    placeholder="Strong initial password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    required
-                  />
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.35rem' }}>Corporate Email (Optional)</label>
+                  <label style={{ display: 'block', fontSize: '0.8rem', color: '#94a3b8', marginBottom: '0.35rem' }}>Corporate Email * (For Setup Link Dispatch)</label>
                   <input
                     type="email"
                     className="gov-search-input"
@@ -524,7 +511,29 @@ export default function UsersTab({
                     placeholder="john@enterprise.com"
                     value={newEmail}
                     onChange={(e) => setNewEmail(e.target.value)}
+                    required
                   />
+                </div>
+
+                <div style={{
+                  background: 'rgba(56, 189, 248, 0.08)',
+                  border: '1px solid rgba(56, 189, 248, 0.25)',
+                  borderRadius: '6px',
+                  padding: '0.7rem 0.85rem',
+                  fontSize: '0.78rem',
+                  color: '#94a3b8',
+                  lineHeight: '1.45',
+                  display: 'flex',
+                  gap: '0.5rem',
+                  alignItems: 'flex-start'
+                }}>
+                  <span style={{ fontSize: '1rem', color: '#38bdf8' }}>✉️</span>
+                  <div>
+                    <strong style={{ color: '#e2e8f0' }}>Secure Passwordless Onboarding:</strong>
+                    <div>
+                      The administrator does not set the user's password. A secure, single-use activation email will be automatically sent to the corporate address above, allowing the user to set their credentials and authenticate directly.
+                    </div>
+                  </div>
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>

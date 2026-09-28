@@ -1,4 +1,5 @@
 import React from 'react'
+import { useTheme } from '../context/ThemeContext.jsx'
 import './TopBar.css'
 
 export default function TopBar({
@@ -13,10 +14,13 @@ export default function TopBar({
   onOpenCreateProject,
   onOpenRulesModal,
   onOpenIntrospectModal,
-  theme = 'dark',
-  onToggleTheme,
+  theme: themeProp,
+  onToggleTheme: onToggleThemeProp,
   onOpenAiAssistant,
 }) {
+  const { theme: ctxTheme, toggleTheme: ctxToggleTheme } = useTheme()
+  const theme = themeProp || ctxTheme
+  const onToggleTheme = onToggleThemeProp || ctxToggleTheme
   const userRole = currentUser?.role?.toLowerCase() || 'viewer'
   const canCreate = ['admin', 'architect'].includes(userRole)
 

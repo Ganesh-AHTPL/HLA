@@ -15,6 +15,7 @@ import RulesModal from './components/RulesModal'
 import GlobalIntrospectModal from './components/GlobalIntrospectModal'
 import RoleInfoModal from './components/RoleInfoModal'
 import HlaAiAssistant from './components/HlaAiAssistant'
+import { useTheme } from './context/ThemeContext.jsx'
 import './components/LoginModal.css'
 import './components/UserManagementModal.css'
 import './components/RulesModal.css'
@@ -23,6 +24,7 @@ import './styles/hlaStudio.css'
 import './index.css'
 
 function App() {
+  const { theme, isDark, toggleTheme } = useTheme()
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const saved = localStorage.getItem('hla_user')
@@ -54,13 +56,12 @@ function App() {
   const [projectDocs, setProjectDocs] = useState([])
   const [selectedDocId, setSelectedDocId] = useState(null)
   const [loadingDocs, setLoadingDocs] = useState(false)
-  const [projectStudioTab, setProjectStudioTab] = useState('workbench') // 'workbench' | 'ingest' | 'connectors' | 'targetdb' | 'scheduler'
+  const [projectStudioTab, setProjectStudioTab] = useState('ingest') // 'ingest' | 'workbench' | 'connectors' | 'targetdb' | 'scheduler'
   const [sideSearch, setSideSearch] = useState('')
   const [toastMsg, setToastMsg] = useState('')
   const [cmdkOpen, setCmdkOpen] = useState(false)
   const [cmdkQuery, setCmdkQuery] = useState('')
   const [refreshing, setRefreshing] = useState(false)
-  const [theme, setTheme] = useState(() => localStorage.getItem('hla_theme') || 'dark')
 
   const showToast = (msg) => {
     setToastMsg(msg)
@@ -91,25 +92,36 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-    localStorage.setItem('hla_theme', theme)
-  }, [theme])
-
-  const toggleTheme = () => {
-    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'))
-  }
-
   // Initialize session: restore saved token and verify with backend, otherwise enforce login
+
   useEffect(() => {
     const initSession = async () => {
+      const searchParams = new URLSearchParams(window.location.search)
+      const hasResetToken = searchParams.get('reset_token') || searchParams.get('token') || searchParams.get('setup_token')
+      if (hasResetToken) {
+        // Direct password setup / onboarding link detected -> clear any prior session and show setup modal
+        setCurrentUser(null)
+        setAuthToken('')
+        localStorage.removeItem('hla_user')
+        localStorage.removeItem('hla_token')
+        localStorage.removeItem('access_token')
+        delete axios.defaults.headers.common['Authorization']
+        setShowUserMgmt(false)
+        setShowRulesModal(false)
+        setShowIntrospectModal(false)
+        setShowRoleInfoModal(false)
+        setShowAiAssistant(false)
+        setShowLoginModal(true)
+        return
+      }
+
       let token = authToken || localStorage.getItem('hla_token') || localStorage.getItem('access_token')
       let user = currentUser
       if (!user) {
         try {
           const saved = localStorage.getItem('hla_user')
           if (saved) user = JSON.parse(saved)
-        } catch (e) {}
+        } catch (e) { }
       }
 
       if (!token || !user) {
@@ -282,8 +294,8 @@ function App() {
   const activeDoc = projectDocs.find((d) => d.id === selectedDocId) || projectDocs[0] || null
 
   const cmdItems = [
-    { label: 'Go to Architecture Workbench', k: 'G W', action: () => { setActiveView('project-studio'); setProjectStudioTab('workbench'); } },
     { label: 'Go to Ingest Documents & Files', k: 'G I', action: () => { setActiveView('project-studio'); setProjectStudioTab('ingest'); } },
+    { label: 'Go to Architecture Workbench', k: 'G W', action: () => { setActiveView('project-studio'); setProjectStudioTab('workbench'); } },
     { label: 'Go to Source Connectors & Vault', k: 'G C', action: () => { setActiveView('project-studio'); setProjectStudioTab('connectors'); } },
     { label: 'Go to Target DB Studio', k: 'G D', action: () => { setActiveView('project-studio'); setProjectStudioTab('targetdb'); } },
     { label: 'Go to Control Scheduler', k: 'G S', action: () => { setActiveView('project-studio'); setProjectStudioTab('scheduler'); } },
@@ -354,6 +366,20 @@ function App() {
           <span className="top" style={{ color: '#38bdf8' }}>✨ AI Assistant</span>
           <span className="bot" style={{ color: '#94a3b8' }}>Local Ollama (qwen3)</span>
         </div>
+        {/* Global Light / Dark Theme Switcher Button */}
+        <button
+          className="theme-toggle-btn"
+          onClick={toggleTheme}
+          title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          aria-label={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          type="button"
+        >
+          <span className="theme-icon">{isDark ? '☀️' : '🌙'}</span>
+          <span className="theme-label">{isDark ? 'Light' : 'Dark'}</span>
+          <div className="theme-toggle-pill">
+            <div className="theme-toggle-thumb" />
+          </div>
+        </button>
         <div className="head-item" onClick={handleLogout} title="Sign out of current account" style={{ cursor: 'pointer' }}>
           <span className="top" style={{ color: '#f87171' }}>Sign Out</span>
           <span className="bot">Log Out 🚪</span>
@@ -515,6 +541,7 @@ function App() {
               projects={projectsList}
               onSelectProject={(proj) => {
                 setActiveProject(proj)
+                setProjectStudioTab('ingest')
                 setActiveView('project-studio')
               }}
               onRefreshProjects={fetchProjectsSummary}
@@ -552,16 +579,16 @@ function App() {
 
                 <div className="tab-row">
                   <button
-                    className={`tab ${projectStudioTab === 'workbench' ? 'active' : ''}`}
-                    onClick={() => setProjectStudioTab('workbench')}
-                  >
-                    Architecture Workbench ({projectDocs.length})
-                  </button>
-                  <button
                     className={`tab ${projectStudioTab === 'ingest' ? 'active' : ''}`}
                     onClick={() => setProjectStudioTab('ingest')}
                   >
                     Ingest Documents &amp; Files
+                  </button>
+                  <button
+                    className={`tab ${projectStudioTab === 'workbench' ? 'active' : ''}`}
+                    onClick={() => setProjectStudioTab('workbench')}
+                  >
+                    Architecture Workbench ({projectDocs.length})
                   </button>
                   <button
                     className={`tab ${projectStudioTab === 'connectors' ? 'active' : ''}`}

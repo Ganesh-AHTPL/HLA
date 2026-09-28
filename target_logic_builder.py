@@ -18,11 +18,69 @@ from datetime import datetime, timezone
 from sqlalchemy import create_engine, text, inspect
 from analyzer import call_ollama, call_groq_or_openai
 from db_fetcher import build_connection_url
+from backend.services.db_manager import DatabaseManager
 
 
 def _sanitize_ident(ident: str) -> str:
-    """Sanitizes SQL identifiers."""
-    return re.sub(r'[^a-zA-Z0-9_]', '_', str(ident or '')).strip('_').lower()
+    """
+    Sanitizes SQL identifiers.
+    If a dotted path is passed (e.g. 'customer.customer_master'), extracts the bare
+    terminal identifier ('customer_master') to avoid generating double-prepended
+    names like 'customer_customer_master'.
+    """
+    if not ident:
+        return ""
+    clean = str(ident).strip().strip('"\'`[]')
+    if "." in clean:
+        parts = [p.strip().strip('"\'`[]') for p in clean.split(".") if p.strip()]
+        clean = parts[-1]
+    return re.sub(r'[^a-zA-Z0-9_]', '_', clean).strip('_').lower()
+
+
+def parse_canonical_table_ref(raw_ref: str, default_schema: str = "public", default_source: str = "") -> dict:
+    """
+    Parses any table reference into canonical structure:
+    {
+        "source": str,
+        "schema": str,
+        "table": str,
+        "qualified_name": "schema.table"
+    }
+    Never produces double-prepended names (e.g. customer.customer_master -> schema='customer', table='customer_master').
+    """
+    if not raw_ref:
+        return {"source": default_source, "schema": default_schema, "table": "", "qualified_name": ""}
+
+    clean = str(raw_ref).strip().strip('"\'`[]')
+    if "." in clean:
+        parts = [p.strip().strip('"\'`[]') for p in clean.split(".") if p.strip()]
+        if len(parts) >= 3:
+            src = parts[0] or default_source
+            sch = parts[1] or default_schema
+            tbl = parts[2]
+        elif len(parts) == 2:
+            src = default_source
+            sch = parts[0] or default_schema
+            tbl = parts[1]
+        else:
+            src = default_source
+            sch = default_schema
+            tbl = parts[0]
+    else:
+        src = default_source
+        sch = default_schema
+        tbl = clean
+
+    tbl_clean = re.sub(r'[^a-zA-Z0-9_]', '_', tbl).strip('_').lower()
+    sch_clean = re.sub(r'[^a-zA-Z0-9_]', '_', sch).strip('_').lower() if sch else default_schema
+    src_clean = str(src).strip()
+
+    return {
+        "source": src_clean,
+        "schema": sch_clean,
+        "table": tbl_clean,
+        "qualified_name": f"{sch_clean}.{tbl_clean}" if sch_clean else tbl_clean
+    }
 
 
 def _is_master_table(entry: dict) -> bool:
@@ -39,33 +97,52 @@ def _format_schema_prefix(schema_name: str, dialect: str = "postgresql") -> tupl
     """
     Returns (schema_create_statement, table_prefix) tailored to target dialect.
     Supports PostgreSQL, MSSQL, MySQL, Snowflake, Oracle, Redshift, BigQuery, SQLite.
+    Always safely quotes the schema identifier to support arbitrary schema names and SQL keywords.
     """
     if not schema_name or (dialect and dialect.lower() == "sqlite"):
         return "", ""
 
+    clean_schema = schema_name.strip()
     d = (dialect or "postgresql").lower().strip()
+
+    sql_reserved = {
+        "unique", "user", "order", "group", "table", "select", "where", "from",
+        "primary", "key", "index", "default", "check", "values", "all", "and",
+        "or", "not", "limit", "column", "desc", "asc", "into", "join", "left",
+        "right", "outer", "inner", "on", "as", "by", "having", "case", "when",
+        "then", "else", "end", "with", "view", "trigger", "function", "procedure",
+        "database", "schema", "grant", "revoke", "create", "alter", "drop"
+    }
+    needs_quote = (
+        not clean_schema.isidentifier()
+        or clean_schema.lower() in sql_reserved
+        or any(c.isupper() for c in clean_schema)
+    )
+
     if d in ("postgresql", "postgres", "rds_postgres", "azure_postgres", "gcp_postgres", "snowflake", "redshift"):
-        quoted_schema = f'"{schema_name}"' if ("." in schema_name or "-" in schema_name) else schema_name
-        create_stmt = f"CREATE SCHEMA IF NOT EXISTS {quoted_schema};"
-        prefix = f"{quoted_schema}."
+        schema_ident = f'"{clean_schema}"' if needs_quote else clean_schema
+        create_stmt = f"CREATE SCHEMA IF NOT EXISTS {schema_ident};"
+        prefix = f"{schema_ident}."
     elif d in ("mysql", "mariadb", "rds_mysql", "azure_mysql", "gcp_mysql"):
-        quoted_schema = f"`{schema_name}`"
-        create_stmt = f"CREATE DATABASE IF NOT EXISTS {quoted_schema};"
-        prefix = f"{quoted_schema}."
+        schema_ident = f"`{clean_schema}`" if needs_quote else clean_schema
+        create_stmt = f"CREATE DATABASE IF NOT EXISTS {schema_ident};"
+        prefix = f"{schema_ident}."
     elif d in ("mssql", "sqlserver", "azure_sql", "azure_synapse", "rds_mssql"):
-        quoted_schema = f"[{schema_name}]"
-        create_stmt = f"IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '{schema_name}') EXEC('CREATE SCHEMA [{schema_name}]');"
-        prefix = f"{quoted_schema}."
+        schema_ident = f"[{clean_schema}]" if needs_quote else clean_schema
+        create_stmt = f"IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '{clean_schema}') EXEC('CREATE SCHEMA [{clean_schema}]');"
+        prefix = f"{schema_ident}."
     elif d in ("oracle", "rds_oracle"):
-        quoted_schema = f'"{schema_name.upper()}"'
-        create_stmt = f"-- Ensure Oracle user/schema {quoted_schema} is granted CREATE TABLE permissions;"
-        prefix = f"{quoted_schema}."
+        schema_ident = f'"{clean_schema.upper()}"' if needs_quote else clean_schema.upper()
+        create_stmt = f"-- Ensure Oracle user/schema {schema_ident} is granted CREATE TABLE permissions;"
+        prefix = f"{schema_ident}."
     elif d == "bigquery":
-        create_stmt = f"CREATE SCHEMA IF NOT EXISTS `{schema_name}`;"
-        prefix = f"`{schema_name}`."
+        schema_ident = f"`{clean_schema}`" if needs_quote else clean_schema
+        create_stmt = f"CREATE SCHEMA IF NOT EXISTS {schema_ident};"
+        prefix = f"{schema_ident}."
     else:
-        create_stmt = f"CREATE SCHEMA IF NOT EXISTS {schema_name};"
-        prefix = f"{schema_name}."
+        schema_ident = f'"{clean_schema}"' if needs_quote else clean_schema
+        create_stmt = f"CREATE SCHEMA IF NOT EXISTS {schema_ident};"
+        prefix = f"{schema_ident}."
 
     return create_stmt, prefix
 
@@ -158,16 +235,7 @@ def get_primary_key_column_def(col_name: str, target_dialect: str) -> str:
         return f"    {col_name} BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"
 
 
-_STANDARD_ENVELOPE_COLUMNS = {
-    "ctrl_id",
-    "exec_seq",
-    "execution_date",
-    "execution_schedule",
-    "create_dtm",
-    "update_dtm",
-    "updated_by",
-    "processing_date",
-}
+_STANDARD_ENVELOPE_COLUMNS = set()
 
 
 def build_table_columns_with_standard_envelope(
@@ -176,130 +244,36 @@ def build_table_columns_with_standard_envelope(
     indent: str = "    ",
 ) -> list[str]:
     """
-    Applies the mandatory generic table column envelope to all generated tables.
-
-    Column order:
-    FIRST (strictly at beginning, strictly in this order):
-      1. ctrl_id
-      2. exec_seq
-      3. execution_date
-      4. execution_schedule
-
-    THEN:
-      5+. All remaining source/business columns (in their original order).
-          - Columns matching any envelope column names are not duplicated.
-          - Source columns are not dropped.
-          - No synthetic source columns are invented.
-
-    LAST (strictly at end, strictly in this order):
-      - create_dtm
-      - update_dtm
-      - updated_by
-      - processing_date
+    Formats the table column definitions purely from HLA/source models.
+    Does NOT inject any synthetic control framework columns (ctrl_id, exec_seq, etc.).
     """
-    td = (target_dialect or "postgresql").lower().strip()
-    is_oracle = td in ("oracle", "rds_oracle")
-    is_mssql = td in ("mssql", "sqlserver", "azure_sql", "azure_synapse", "rds_mssql")
-    is_mysql = td in ("mysql", "mariadb", "rds_mysql", "azure_mysql", "gcp_mysql")
-    is_snowflake = td == "snowflake"
-
-    if is_oracle:
-        first_cols = [
-            f"{indent}ctrl_id NUMBER(10) NULL",
-            f"{indent}exec_seq NUMBER(10) NULL",
-            f"{indent}execution_date DATE NULL",
-            f"{indent}execution_schedule VARCHAR2(100) NULL",
-        ]
-        last_cols = [
-            f"{indent}create_dtm TIMESTAMP DEFAULT SYSTIMESTAMP NULL",
-            f"{indent}update_dtm TIMESTAMP DEFAULT SYSTIMESTAMP NULL",
-            f"{indent}updated_by VARCHAR2(50) NULL",
-            f"{indent}processing_date DATE NULL",
-        ]
-    elif is_mssql:
-        first_cols = [
-            f"{indent}[ctrl_id] INT NULL",
-            f"{indent}[exec_seq] INT NULL",
-            f"{indent}[execution_date] DATE NULL",
-            f"{indent}[execution_schedule] VARCHAR(100) NULL",
-        ]
-        last_cols = [
-            f"{indent}[create_dtm] DATETIME2 DEFAULT CURRENT_TIMESTAMP NULL",
-            f"{indent}[update_dtm] DATETIME2 DEFAULT CURRENT_TIMESTAMP NULL",
-            f"{indent}[updated_by] VARCHAR(50) NULL",
-            f"{indent}[processing_date] DATE NULL",
-        ]
-    elif is_mysql:
-        first_cols = [
-            f"{indent}ctrl_id INT NULL",
-            f"{indent}exec_seq INT NULL",
-            f"{indent}execution_date DATE NULL",
-            f"{indent}execution_schedule VARCHAR(100) NULL",
-        ]
-        last_cols = [
-            f"{indent}create_dtm TIMESTAMP DEFAULT CURRENT_TIMESTAMP NULL",
-            f"{indent}update_dtm TIMESTAMP DEFAULT CURRENT_TIMESTAMP NULL",
-            f"{indent}updated_by VARCHAR(50) NULL",
-            f"{indent}processing_date DATE NULL",
-        ]
-    elif is_snowflake:
-        first_cols = [
-            f"{indent}ctrl_id NUMBER(10,0) NULL",
-            f"{indent}exec_seq NUMBER(10,0) NULL",
-            f"{indent}execution_date DATE NULL",
-            f"{indent}execution_schedule VARCHAR(100) NULL",
-        ]
-        last_cols = [
-            f"{indent}create_dtm TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP() NULL",
-            f"{indent}update_dtm TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP() NULL",
-            f"{indent}updated_by VARCHAR(50) NULL",
-            f"{indent}processing_date DATE NULL",
-        ]
-    else:
-        # Default / PostgreSQL exact structure
-        first_cols = [
-            f"{indent}ctrl_id int4 NULL",
-            f"{indent}exec_seq int4 NULL",
-            f"{indent}execution_date date NULL",
-            f"{indent}execution_schedule varchar(100) NULL",
-        ]
-        last_cols = [
-            f"{indent}create_dtm timestamp DEFAULT now() NULL",
-            f"{indent}update_dtm timestamp DEFAULT now() NULL",
-            f"{indent}updated_by varchar(50) NULL",
-            f"{indent}processing_date date NULL",
-        ]
-
-    # Process middle columns
-    processed_middle = []
-    seen_col_names = set()
+    processed = []
+    seen = set()
 
     for col in (middle_columns or []):
         if isinstance(col, dict):
             raw_name = str(col.get("name", "")).strip()
             name_norm = raw_name.strip("\"'`[]").lower()
-            if not name_norm or name_norm in _STANDARD_ENVELOPE_COLUMNS or name_norm in seen_col_names:
+            if not name_norm or name_norm in seen:
                 continue
-            seen_col_names.add(name_norm)
+            seen.add(name_norm)
             col_type = col.get("type", "VARCHAR(255)")
             nullable = col.get("nullable", "")
             default = col.get("default", "")
-            processed_middle.append(f"{indent}{raw_name} {col_type}{nullable}{default}".rstrip())
+            processed.append(f"{indent}{raw_name} {col_type}{nullable}{default}".rstrip())
         elif isinstance(col, str):
             clean_str = col.strip()
             if not clean_str:
                 continue
-            # Extract column name from definition string (first token)
             first_token = clean_str.split(None, 1)[0]
             name_norm = first_token.strip("\"'`[],").lower()
-            if not name_norm or name_norm in _STANDARD_ENVELOPE_COLUMNS or name_norm in seen_col_names:
+            if not name_norm or name_norm in seen:
                 continue
-            seen_col_names.add(name_norm)
+            seen.add(name_norm)
             line = f"{indent}{clean_str}" if not col.startswith(indent) else col
-            line = line.rstrip().rstrip(",")
-            processed_middle.append(line)
+            processed.append(line.rstrip().rstrip(","))
 
-    return first_cols + processed_middle + last_cols
+    return processed
 
 
 
@@ -631,349 +605,349 @@ def generate_source_tables_ddl(target_schema: str, target_dialect: str, sources:
     return "\n\n".join(statements)
 
 
-def generate_target_ddl(target_schema: str, target_dialect: str, sources: list, rules: dict, mappings: list, introspected_schemas: dict, analysis_data: dict = None):
+def discover_target_entities(analysis_data: dict = None, mappings: list = None) -> list:
     """
-    Generates complete dynamic target architecture DDL:
-    1. Target Schema Creation (using the configured target schema)
-    2. Scanned Source Tables Replicated (with HLA logic columns alone, only if found)
-    3. Staging Cleansed Tables (stg_{source}_clean for each found source)
-    4. Dedicated Configuration Tables (from Table 12 or Excel if present)
-    5. Consolidated Balance Dataset Table ({ctrl}_balanced_dataset)
-    6. Reconciliation & Exception Tables ({ctrl}_recon_matches, {ctrl}_recon_exceptions)
-    7. Target Report Tables (from Table 10 mappings or Excel Data Model)
+    Dynamically discovers all explicit target/data-model entities from the parsed HLA metadata.
+    Zero synthetic prefixes or hardcoded table names.
 
-    GUARD: If no source table was actually introspected (source DB never scanned / no
-    credentials available), this function returns a comment-only block explaining that
-    DDL generation requires a live source DB scan.  No CREATE TABLE statements are emitted
-    to prevent incomplete/fabricated DDL from being deployed to the target database.
+    Discovered from:
+    1. analysis_data['data_model'] (Data Model sheet / stage tables / target entities)
+    2. analysis_data['target_entities'] (if explicitly parsed)
+    3. analysis_data['mappings'] or mappings (if explicit target_table/report_table_name/target_entity is specified)
+    4. analysis_data['report_derivations'] / analysis_data['reports'] (derived target report models)
+
+    Returns: list of dicts:
+        {
+            "table_name": str,
+            "stage": str,
+            "load_type": str,
+            "description": str,
+            "columns": [{"name": str, "type": str, "nullable": str, "default": str}],
+            "is_master": bool,
+            "source_origin": str
+        }
+    """
+    if not analysis_data and not mappings:
+        return []
+
+    entities_map: dict = {}
+
+    def _extract_stem_tokens(name_str: str) -> set:
+        """Extracts substantive stem tokens (>= 3 chars) ignoring generic stage prefixes."""
+        tokens = set()
+        clean = re.sub(r'[^a-zA-Z0-9_]', ' ', str(name_str or '')).lower()
+        ignore_stems = {"stg", "staging", "tbl", "table", "dataset", "source", "target", "dim", "fct", "summary", "model", "raw", "clean"}
+        for part in clean.replace(".", " ").replace("_", " ").split():
+            part = part.strip()
+            if len(part) >= 3 and part not in ignore_stems:
+                tokens.add(part)
+        return tokens
+
+    # 1. Discover from analysis_data["data_model"]
+    dm_list = (analysis_data.get("data_model") or []) if analysis_data else []
+    for dm in dm_list:
+        if not isinstance(dm, dict):
+            continue
+        raw_name = (
+            dm.get("dataset_table_entity_name") or
+            dm.get("table_name") or
+            dm.get("entity_name") or
+            dm.get("target_table") or
+            dm.get("target_entity") or
+            dm.get("target_dataset") or
+            dm.get("output_result_set") or
+            dm.get("output_dataset") or
+            dm.get("dataset") or
+            dm.get("table") or
+            ""
+        )
+        if not raw_name:
+            for k, v in dm.items():
+                if not k.startswith("_") and ("entity" in k or "target" in k or "table" in k or "dataset" in k) and v:
+                    raw_name = str(v).strip()
+                    break
+        if not raw_name:
+            continue
+
+        t_name = _sanitize_ident(raw_name)
+        if not t_name:
+            continue
+
+        stage = dm.get("stage") or dm.get("data_process_stage") or "Target Data Model"
+        load_type = dm.get("load_type") or dm.get("type_of_load") or "Truncate & load"
+        desc = dm.get("description") or dm.get("purpose") or ""
+        is_master = _is_master_table(dm)
+
+        cols = []
+        raw_cols = dm.get("columns") or dm.get("fields") or []
+        if isinstance(raw_cols, list):
+            for c in raw_cols:
+                if isinstance(c, dict):
+                    cn = _sanitize_ident(c.get("name") or c.get("column_name") or "")
+                    ct = c.get("type") or c.get("data_type") or "VARCHAR(255)"
+                    n_raw = str(c.get("nullable", "")).strip()
+                    n_str = " NOT NULL" if n_raw.upper() in ("N", "NO", "FALSE", "0", "NOT NULL") else ""
+                    d_raw = str(c.get("default", "")).strip()
+                    d_str = f" DEFAULT {d_raw}" if d_raw else ""
+                else:
+                    cn = _sanitize_ident(str(c))
+                    ct = "VARCHAR(255)"
+                    n_str = ""
+                    d_str = ""
+                if cn:
+                    cols.append({"name": cn, "type": ct, "nullable": n_str, "default": d_str})
+
+        entities_map[t_name] = {
+            "table_name": t_name,
+            "stage": stage,
+            "load_type": load_type,
+            "description": desc,
+            "columns": cols,
+            "is_master": is_master,
+            "source_origin": "data_model"
+        }
+
+    # 2. Discover from analysis_data["target_entities"]
+    te_list = (analysis_data.get("target_entities") or []) if analysis_data else []
+    for te in te_list:
+        if isinstance(te, str):
+            t_name = _sanitize_ident(te)
+            if t_name and t_name not in entities_map:
+                entities_map[t_name] = {
+                    "table_name": t_name,
+                    "stage": "Target Entity",
+                    "load_type": "Truncate & load",
+                    "description": f"Target entity: {te}",
+                    "columns": [],
+                    "is_master": False,
+                    "source_origin": "target_entities"
+                }
+        elif isinstance(te, dict):
+            raw_name = te.get("table_name") or te.get("entity_name") or te.get("target_table") or te.get("target_entity") or ""
+            t_name = _sanitize_ident(raw_name)
+            if t_name and t_name not in entities_map:
+                entities_map[t_name] = {
+                    "table_name": t_name,
+                    "stage": te.get("stage", "Target Entity"),
+                    "load_type": te.get("load_type", "Truncate & load"),
+                    "description": te.get("description", f"Target entity: {raw_name}"),
+                    "columns": te.get("columns", []),
+                    "is_master": _is_master_table(te),
+                    "source_origin": "target_entities"
+                }
+
+    # 3. Process All Attribute Mappings (resolve mapping ownership)
+    all_mappings = (mappings or [])
+    if analysis_data and "mappings" in analysis_data:
+        all_mappings = analysis_data["mappings"] or all_mappings
+
+    for m in all_mappings:
+        if not isinstance(m, dict):
+            continue
+        tgt_tbl = (
+            m.get("target_table") or
+            m.get("report_table_name") or
+            m.get("target_entity") or
+            m.get("target_dataset") or
+            ""
+        )
+        col_name = _sanitize_ident(m.get("target_attribute") or m.get("target_column") or m.get("attribute_name") or "")
+        col_type = m.get("data_type") or m.get("target_data_type") or "VARCHAR(255)"
+        is_null = m.get("nullable", "Y")
+        nullable_str = " NOT NULL" if str(is_null).strip().upper() in ("N", "NO", "FALSE", "0") else ""
+
+        if not col_name or col_name in _STANDARD_ENVELOPE_COLUMNS:
+            continue
+
+        # If explicit target table is named in mapping
+        if tgt_tbl:
+            t_name = _sanitize_ident(tgt_tbl)
+            if t_name:
+                if t_name not in entities_map:
+                    entities_map[t_name] = {
+                        "table_name": t_name,
+                        "stage": "Target Report Model",
+                        "load_type": "Truncate & load",
+                        "description": f"Target entity derived from HLA mappings: {tgt_tbl}",
+                        "columns": [],
+                        "is_master": False,
+                        "source_origin": "mappings"
+                    }
+                if not any(c["name"] == col_name for c in entities_map[t_name]["columns"]):
+                    entities_map[t_name]["columns"].append({"name": col_name, "type": col_type, "nullable": nullable_str, "default": ""})
+
+                # Check if HLA rules reference key/join identifiers on this stream
+                src_tbl_str = str(m.get("source_table") or "")
+                src_tbl_stems = _extract_stem_tokens(src_tbl_str) | _extract_stem_tokens(t_name)
+                rules_list = ((analysis_data.get("rules", {}).get("filter_rules") or []) + (analysis_data.get("rules", {}).get("business_rules") or [])) if analysis_data else []
+                for r in rules_list:
+                    r_stream = str(r.get("data_stream", "")).lower()
+                    r_stems = _extract_stem_tokens(r_stream)
+                    if (r_stream and (r_stream in src_tbl_str.lower() or src_tbl_str.lower() in r_stream)) or (r_stems & src_tbl_stems):
+                        full_r = f"{r.get('rule_statement', '')} {r.get('filter_condition', '')}".lower()
+                        for tok in ("customer_id", "transaction_id", "account_id", "item_id", "order_id", "device_id"):
+                            if tok in full_r and not any(c["name"] == tok for c in entities_map[t_name]["columns"]):
+                                entities_map[t_name]["columns"].insert(0, {"name": tok, "type": "VARCHAR(255)", "nullable": "", "default": ""})
+
+                # Also preserve common document grain/foreign keys present across mappings so downstream entity joins work seamlessly
+                for tok in ("customer_id", "client_id", "account_id", "item_id", "order_id", "device_id"):
+                    if any(tok in str(m_other).lower() for m_other in (mappings or [])):
+                        if not any(c["name"] == tok for c in entities_map[t_name]["columns"]):
+                            entities_map[t_name]["columns"].insert(0, {"name": tok, "type": "VARCHAR(255)", "nullable": "", "default": ""})
+        else:
+            # Resolve mapping ownership generically to Data Model staging entities
+            src_tbl = m.get("source_table", "")
+            src_stems = _extract_stem_tokens(src_tbl)
+
+            # Find matching staging entity in Data Model
+            for ent_name, ent_info in entities_map.items():
+                stage_upper = str(ent_info.get("stage", "")).upper()
+                is_staging = stage_upper in ("STAGING", "STAGE", "RAW", "SOURCE", "") or ent_name.lower().startswith("stg_")
+                if not is_staging:
+                    continue
+                ent_stems = _extract_stem_tokens(ent_name)
+                # Match if substantive stem overlaps between source and staging model
+                if src_stems and ent_stems and (src_stems & ent_stems):
+                    if not any(c["name"] == col_name for c in ent_info["columns"]):
+                        ent_info["columns"].append({"name": col_name, "type": col_type, "nullable": nullable_str, "default": ""})
+
+    # 4. Process Report Derivation Logic
+    report_derivs = (analysis_data.get("report_derivations") or analysis_data.get("reports") or []) if analysis_data else []
+    for rep in report_derivs:
+        if not isinstance(rep, dict):
+            continue
+        col_name = _sanitize_ident(rep.get("target_attribute") or rep.get("target_column") or rep.get("attribute_name") or "")
+        src_tbl = rep.get("source_table") or rep.get("tables") or ""
+        logic = rep.get("derivation_logic") or rep.get("logic") or ""
+
+        if not col_name or col_name in _STANDARD_ENVELOPE_COLUMNS:
+            continue
+
+        col_type = "DECIMAL(18,2)" if any(k in logic.upper() for k in ("SUM", "AVG", "DECIMAL", "AMOUNT")) else ("BIGINT" if "COUNT" in logic.upper() else "VARCHAR(255)")
+
+        # Find curated / reporting target entity
+        for ent_name, ent_info in entities_map.items():
+            stage_upper = str(ent_info.get("stage", "")).upper()
+            if stage_upper in ("CURATED", "REPORTING", "SUMMARY", "POST-EXECUTION") or "summary" in ent_name.lower() or "report" in ent_name.lower():
+                # Also attach grain key from matching upstream staging entities
+                ent_stems = _extract_stem_tokens(ent_name)
+                for other_name, other_info in entities_map.items():
+                    if other_name != ent_name:
+                        other_stems = _extract_stem_tokens(other_name)
+                        if ent_stems & other_stems:
+                            for col in other_info.get("columns", []):
+                                c_low = col["name"].lower()
+                                if any(k in c_low for k in ("_id", "id_", "_key", "_code", "id", "key", "code")):
+                                    if not any(c["name"] == col["name"] for c in ent_info["columns"]):
+                                        ent_info["columns"].insert(0, {"name": col["name"], "type": col["type"], "nullable": "", "default": ""})
+
+                if not any(c["name"] == col_name for c in ent_info["columns"]):
+                    ent_info["columns"].append({"name": col_name, "type": col_type, "nullable": "", "default": ""})
+
+    # 5. Populate Exception Tables if defined in Data Model
+    for ent_name, ent_info in entities_map.items():
+        stage_upper = str(ent_info.get("stage", "")).upper()
+        if "exception" in ent_name.lower() or stage_upper == "EXCEPTION":
+            if not ent_info["columns"]:
+                ent_info["columns"] = [
+                    {"name": "exception_id", "type": "BIGINT", "nullable": "", "default": ""},
+                    {"name": "rule_id", "type": "VARCHAR(50)", "nullable": "", "default": ""},
+                    {"name": "source_dataset", "type": "VARCHAR(100)", "nullable": "", "default": ""},
+                    {"name": "record_key", "type": "VARCHAR(255)", "nullable": "", "default": ""},
+                    {"name": "error_message", "type": "VARCHAR(500)", "nullable": "", "default": ""},
+                    {"name": "impact_amount", "type": "DECIMAL(18,2)", "nullable": "", "default": ""},
+                    {"name": "created_at", "type": "TIMESTAMP", "nullable": "", "default": ""}
+                ]
+
+    return list(entities_map.values())
+
+
+def generate_target_ddl(target_schema: str, target_dialect: str, sources: list, rules: dict, mappings: list, introspected_schemas: dict = None, analysis_data: dict = None) -> str:
+    """
+    Generates 100% document-driven Target Architecture DDL.
+    Target objects are generated ONLY when explicitly defined in the uploaded HLA.
+    Zero synthetic prefixes, zero hardcoded table names, zero assumed staging/balance/recon tables.
     """
     if isinstance(target_schema, dict):
-        target_schema = target_schema.get("schema_name", "ra_ctrl")
+        target_schema = target_schema.get("schema_name", "public")
 
     create_schema_stmt, prefix = _format_schema_prefix(target_schema, target_dialect)
     ddl_statements = []
 
-    ctrl_id = (analysis_data.get("control_overview") or {}).get("identification", {}) if analysis_data else {}
-    ctrl_raw = ctrl_id.get("control_number") or "ctrl"
-    ctrl_prefix = _sanitize_ident(ctrl_raw)
-    if not ctrl_prefix.startswith("ctrl"):
-        ctrl_prefix = f"ctrl_{ctrl_prefix}"
-
-    # ── SOURCE-SCAN GUARD ────────────────────────────────────────────────────
-    # Determine whether any source table was actually found via live DB introspection.
-    # If introspected_schemas is empty, or every entry reports table_found=False,
-    # no real column data is available.  Emitting fabricated DDL at this point
-    # could corrupt the target schema, so we bail out with a clear comment block.
-    source_cols_map_check, table_status_map_check = get_source_column_definitions(
-        sources, introspected_schemas, target_dialect, analysis_data
-    )
-    any_source_found = any(
-        s.get("table_found") for s in table_status_map_check.values()
-    )
-
-    if not any_source_found:
-        # Build a helpful comment-only block listing each source table that was missed.
-        missing_tables = [
-            s.get("table_name", t) for t, s in table_status_map_check.items()
-        ] or [s.get("source_table") or s.get("full_table_name", "unknown") for s in (sources or [])]
-        table_list = "\n".join(
-            f"--   • {tbl}" for tbl in missing_tables
-        ) or "--   (no source tables declared in HLA document)"
-
-        guard_comment = f"""-- ============================================================================
--- ⚠  DDL GENERATION BLOCKED — SOURCE DATABASE NOT SCANNED
--- ============================================================================
--- Target Schema  : {target_schema}
--- Dialect        : {target_dialect.upper()}
--- Reason         : None of the upstream source tables could be introspected.
---                  This usually means:
---                    1. No source DB credentials have been configured for this
---                       project (Target DB Studio → Source connection).
---                    2. The source database is unreachable from this host.
---                    3. The schema / table names in the HLA document do not
---                       match the actual source database objects.
---
--- Required source tables (from HLA document):
-{table_list}
---
--- ACTION REQUIRED:
---   1. Configure & test a Source DB connection in Target DB Studio.
---   2. Re-run "Build Target Logic" after a successful connection test.
---   3. DDL will be generated using the live source column definitions.
--- ============================================================================"""
-
-        if create_schema_stmt:
-            return create_schema_stmt + "\n\n" + guard_comment
-        return guard_comment
-    # ── END GUARD ────────────────────────────────────────────────────────────
-
-    # Re-use the already-computed maps (avoids a second DB round-trip)
-    source_cols_map = source_cols_map_check
-    table_status_map = table_status_map_check
-
-    # 1. Target Schema Creation
     if create_schema_stmt:
         ddl_statements.append(create_schema_stmt)
 
-    # 2. Scanned Source Tables (structure from source DB, filtered to logic columns alone)
-    source_ddl = generate_source_tables_ddl(target_schema, target_dialect, sources, introspected_schemas, analysis_data)
-    if source_ddl:
-        ddl_statements.append(f"""-- ============================================================================
--- 1. SOURCE TABLES (REPLICATED WITH HLA REQUIRED COLUMNS ALONE)
--- Schema: {target_schema} | Dialect: {target_dialect.upper()}
--- Structure taken from source DB introspection - only required HLA columns created
--- Tables not found in source DB are omitted
+    discovered_targets = discover_target_entities(analysis_data, mappings)
+
+    if not discovered_targets:
+        no_target_msg = f"""-- ============================================================================
+-- TARGET ENTITY NOT DEFINED
 -- ============================================================================
-{source_ddl}""")
+-- The uploaded HLA contains source metadata but does not define a target
+-- entity/table. No target table was generated.
+-- ============================================================================"""
+        ddl_statements.append(no_target_msg)
+        return "\n\n".join(ddl_statements)
 
-    # 3. Dynamic Staging Cleansed Tables per Source (ONLY for tables found in source DB)
-    # (source_cols_map and table_status_map already computed above — no second call needed)
+    master_table_comments = []
+    target_tables_ddl = []
 
-    staging_tables_ddl = []
-    for clean_table, status in table_status_map.items():
-        if not status.get("table_found"):
-            continue
-        cols = source_cols_map.get(clean_table, [])
-        stg_name = f"stg_{clean_table}_clean"
-        col_lines = [f"{c['name']} {c['type']}" for c in cols]
-        # Append staging audit columns
-        col_lines.append(f"cleansed_rule_flag {map_data_type('VARCHAR(100)', target_dialect)} DEFAULT 'CLEANSED'")
-        col_lines.append(f"cleansed_at {map_data_type('TIMESTAMP', target_dialect)} DEFAULT CURRENT_TIMESTAMP")
+    # Check target envelope requirement: Generic HLA uses NONE unless explicitly configured as LEGACY_CONTROL
+    target_envelope = (analysis_data.get("target_envelope") or "NONE").upper() if analysis_data else "NONE"
 
-        all_stg_cols = build_table_columns_with_standard_envelope(col_lines, target_dialect)
-        stmt = f"""-- Staging Cleansed Table for: {clean_table} (HLA Required Columns Alone)
-CREATE TABLE IF NOT EXISTS {prefix}{stg_name} (
-{',\n'.join(all_stg_cols)}
-);"""
-        staging_tables_ddl.append(stmt)
+    for entity in discovered_targets:
+        t_name = entity["table_name"]
+        stage = entity.get("stage", "Target Entity")
+        load_type = entity.get("load_type", "Truncate & load")
+        desc = entity.get("description", "")
+        is_master = entity.get("is_master", False)
 
-    if staging_tables_ddl:
-        ddl_statements.append(f"""-- ============================================================================
--- 2. STAGING CLEANSED DATASETS (ONE PER FOUND UPSTREAM FEED)
--- Holds pre-execution deduplicated and null-checked records
--- ============================================================================
-{'\n\n'.join(staging_tables_ddl)}""")
-
-    # 4. Dedicated Configuration Tables (from Table 12 or Excel Config Tables)
-    config_tables = (analysis_data.get("config_tables") or []) if analysis_data else []
-    cfg_statements = []
-    if config_tables:
-        for cfg in config_tables:
-            cfg_name = _sanitize_ident(cfg.get("config_table_name") or cfg.get("table_name") or "cfg_params")
-            purpose = cfg.get("purpose") or cfg.get("description") or "Dynamic solution parameters"
-
-            # ── Master-table guard: pre-existing tables must NOT be recreated ──
-            if _is_master_table(cfg):
-                # Derive the fully-qualified HLA reference name:
-                # Fully qualified reference is built from the configured schema and control-derived table name.
-                fq_ref = f"{prefix}{ctrl_prefix}_{cfg_name}"
-                cfg_statements.append(
-                    f"-- MASTER TABLE (pre-existing): {fq_ref}\n"
-                    f"-- Description: {purpose}\n"
-                    f"-- Reference as: {fq_ref}\n"
-                    f"-- Action: no CREATE TABLE emitted — table already exists in target schema."
-                )
-                continue
-
-            target_col = _sanitize_ident(cfg.get("target_column") or "config_value")
-            mid_cols = [
-                f"config_id {map_data_type('BIGINT', target_dialect)}",
-                f"{target_col} {map_data_type('VARCHAR(255)', target_dialect)} NOT NULL",
-                f"description {map_data_type('VARCHAR(255)', target_dialect)}",
-                f"is_active {map_data_type('BOOLEAN', target_dialect)} DEFAULT TRUE",
-            ]
-            all_cfg_cols = build_table_columns_with_standard_envelope(mid_cols, target_dialect)
-            cfg_statements.append(f"""-- Dedicated Configuration: {cfg_name} ({purpose})
-CREATE TABLE IF NOT EXISTS {prefix}{cfg_name} (
-{',\n'.join(all_cfg_cols)}
-);""")
-    else:
-        # Default generic exclusion parameter tables
-        mid_cols = [
-            f"exclusion_type {map_data_type('VARCHAR(50)', target_dialect)} NOT NULL",
-            f"parameter_value {map_data_type('VARCHAR(255)', target_dialect)} NOT NULL",
-            f"reason {map_data_type('VARCHAR(255)', target_dialect)}",
-            f"is_active {map_data_type('BOOLEAN', target_dialect)} DEFAULT TRUE",
-        ]
-        all_cfg_cols = build_table_columns_with_standard_envelope(mid_cols, target_dialect)
-        cfg_statements.append(f"""-- Generic Configuration & Exclusion Registry
-CREATE TABLE IF NOT EXISTS {prefix}cfg_exclusion_parameters (
-{',\n'.join(all_cfg_cols)}
-);""")
-
-    if cfg_statements:
-        ddl_statements.append(f"""-- ============================================================================
--- 3. DEDICATED CONFIGURATION TABLES
--- ============================================================================
-{chr(10).join(cfg_statements)}""")
-
-    # 5. Consolidated Balance Dataset Table ({ctrl_prefix}_balanced_dataset)
-    # Collect union of primary columns across sources
-    all_col_names = []
-    seen_cols = set()
-    for clean_table, cols in source_cols_map.items():
-        for c in cols:
-            if c['name'] not in seen_cols:
-                seen_cols.add(c['name'])
-                all_col_names.append(c)
-
-    bal_cols = [f"source_stream {map_data_type('VARCHAR(100)', target_dialect)} NOT NULL"]
-    for c in all_col_names[:12]:
-        bal_cols.append(f"{c['name']} {map_data_type(c['type'], target_dialect)}")
-    bal_cols.append(f"balance_status {map_data_type('VARCHAR(50)', target_dialect)} DEFAULT 'BALANCED'")
-    bal_cols.append(f"balanced_at {map_data_type('TIMESTAMP', target_dialect)} DEFAULT CURRENT_TIMESTAMP")
-
-    all_bal_cols = build_table_columns_with_standard_envelope(bal_cols, target_dialect)
-    bal_table_name = f"{ctrl_prefix}_balanced_dataset"
-    ddl_statements.append(f"""-- ============================================================================
--- 4. CONSOLIDATED BALANCE DATASET GATE (R11 BALANCE NODE)
--- Master staging table where all cleansed streams converge prior to reconciliation
--- ============================================================================
-CREATE TABLE IF NOT EXISTS {prefix}{bal_table_name} (
-{',\n'.join(all_bal_cols)}
-);""")
-
-    # 6. Reconciliation & Exception Tables
-    recon_matches_tbl = f"{ctrl_prefix}_recon_matches"
-    recon_exceptions_tbl = f"{ctrl_prefix}_recon_exceptions"
-
-    recon_cols = [
-        f"match_id {map_data_type('BIGINT', target_dialect)}",
-        f"primary_key_a {map_data_type('VARCHAR(100)', target_dialect)}",
-        f"primary_key_b {map_data_type('VARCHAR(100)', target_dialect)}",
-        f"match_key_value {map_data_type('VARCHAR(255)', target_dialect)}",
-        f"reconciliation_tier {map_data_type('VARCHAR(50)', target_dialect)} NOT NULL",
-        f"discrepancy_details {map_data_type('TEXT', target_dialect)}",
-        f"matched_at {map_data_type('TIMESTAMP', target_dialect)} DEFAULT CURRENT_TIMESTAMP",
-    ]
-    all_recon_cols = build_table_columns_with_standard_envelope(recon_cols, target_dialect)
-
-    exc_cols = [
-        f"exception_id {map_data_type('BIGINT', target_dialect)}",
-        f"match_id {map_data_type('BIGINT', target_dialect)}",
-        f"record_identifier {map_data_type('VARCHAR(100)', target_dialect)}",
-        f"bucket_category {map_data_type('VARCHAR(50)', target_dialect)} NOT NULL",
-        f"kri_risk_level {map_data_type('VARCHAR(30)', target_dialect)} DEFAULT 'LOW'",
-        f"exception_reason {map_data_type('TEXT', target_dialect)}",
-        f"operational_action_required {map_data_type('TEXT', target_dialect)}",
-        f"remediated_flag {map_data_type('BOOLEAN', target_dialect)} DEFAULT FALSE",
-        f"created_at {map_data_type('TIMESTAMP', target_dialect)} DEFAULT CURRENT_TIMESTAMP",
-    ]
-    all_exc_cols = build_table_columns_with_standard_envelope(exc_cols, target_dialect)
-
-    ddl_statements.append(f"""-- ============================================================================
--- 5. RECONCILIATION MATCHES & EXCEPTION BUCKETS
--- Stores multi-pass matching results and categorized KRI exceptions
--- ============================================================================
-CREATE TABLE IF NOT EXISTS {prefix}{recon_matches_tbl} (
-{',\n'.join(all_recon_cols)}
-);
-
-CREATE TABLE IF NOT EXISTS {prefix}{recon_exceptions_tbl} (
-{',\n'.join(all_exc_cols)}
-);""")
-
-    # 7. Dynamic Target Report Tables from Mappings (Table 10)
-    report_groups = {}
-    for m in (mappings or []):
-        tbl = _sanitize_ident(m.get("report_table_name") or "target_report_dataset")
-        col = _sanitize_ident(m.get("target_column") or "attr")
-        if not col:
-            continue
-        if tbl not in report_groups:
-            report_groups[tbl] = []
-        if col not in report_groups[tbl]:
-            report_groups[tbl].append(col)
-
-    report_tables_ddl = []
-    for rep_tbl, cols in report_groups.items():
-        col_lines = [f"{c} {map_data_type('VARCHAR(255)', target_dialect)}" for c in cols]
-
-        all_rep_cols = build_table_columns_with_standard_envelope(col_lines, target_dialect)
-        stmt = f"""-- Target Report Output: {rep_tbl}
-CREATE TABLE IF NOT EXISTS {prefix}{rep_tbl} (
-{',\n'.join(all_rep_cols)}
-);"""
-        report_tables_ddl.append(stmt)
-
-    if report_tables_ddl:
-        ddl_statements.append(f"""-- ============================================================================
--- 6. TARGET REPORT MODELS (DERIVED FROM ATTRIBUTE MAPPINGS)
--- ============================================================================
-{chr(10).join(report_tables_ddl)}""")
-
-    # 8. Dynamic Target Data Model Stage Tables (from HLA Specification T26 / Data Model)
-    dm_tables = (analysis_data.get("data_model") or []) if analysis_data else []
-    dm_ddl = []
-    master_table_comments = []  # collect reuse-only comments separately
-    already_defined = {rep_tbl.lower() for rep_tbl in report_groups}
-    for clean_table in source_cols_map:
-        already_defined.add(f"stg_{clean_table}_clean".lower())
-    already_defined.add(bal_table_name.lower())
-    already_defined.add(recon_matches_tbl.lower())
-    already_defined.add(recon_exceptions_tbl.lower())
-
-    for dm in dm_tables:
-        t_name = _sanitize_ident(dm.get("table_name") or "")
-        if not t_name or t_name.lower() in already_defined:
-            continue
-        already_defined.add(t_name.lower())
-        load_strat = dm.get("load_type") or "Truncate & load"
-        stage_desc = dm.get("stage") or "Data Model Stage"
-        desc = dm.get("description") or ""
-
-        # ── Master-table guard ────────────────────────────────────────────────
-        # Tables flagged as 'master table' in the HLA Data Model description
-        # already exist in the target schema.  Emit a reference comment showing
-        # the fully-qualified HLA name; never CREATE TABLE for them.
-        if _is_master_table(dm):
-            # Naming convention: {schema}.{ctrl_prefix}_{table}
-            # Fully qualified reference is built from the configured schema.
-            fq_ref = f"{prefix}{ctrl_prefix}_{t_name}"
+        if is_master:
+            fq_ref = f"{prefix}{t_name}"
             master_table_comments.append(
                 f"-- MASTER TABLE (pre-existing): {fq_ref}\n"
-                f"-- HLA Name    : {prefix}{ctrl_prefix}_{t_name}\n"
-                f"-- Stage       : {stage_desc} | Load Strategy: {load_strat}\n"
+                f"-- Stage       : {stage} | Strategy: {load_type}\n"
                 f"-- Description : {desc}\n"
                 f"-- Reference as: {fq_ref}\n"
                 f"-- Action      : no CREATE TABLE emitted — table already exists in target schema."
             )
             continue
-        # ── End guard ────────────────────────────────────────────────────────
 
-        dm_columns_def = dm.get("columns") or dm.get("fields") or []
-        dm_cols = []
-        if dm_columns_def:
-            for dc in dm_columns_def:
-                col_n = _sanitize_ident(dc.get("name") if isinstance(dc, dict) else str(dc))
-                col_t = dc.get("type", "VARCHAR(255)") if isinstance(dc, dict) else "VARCHAR(255)"
-                if col_n and col_n not in _STANDARD_ENVELOPE_COLUMNS:
-                    dm_cols.append(f"{col_n} {map_data_type(col_t, target_dialect)}")
-        if not dm_cols:
-            dm_cols = [
-                f"data_payload {map_data_type('JSON', target_dialect)}",
+        raw_cols = entity.get("columns", [])
+        mid_cols = []
+        if raw_cols:
+            for c in raw_cols:
+                cn = c.get("name")
+                ct = map_data_type(c.get("type", "VARCHAR(255)"), target_dialect)
+                nullable = c.get("nullable", "")
+                default = c.get("default", "")
+                if cn and cn not in _STANDARD_ENVELOPE_COLUMNS:
+                    mid_cols.append(f"{cn} {ct}{nullable}{default}".strip())
+
+        if not mid_cols:
+            mid_cols = [
+                f"data_payload {map_data_type('JSON', target_dialect)}"
             ]
-        all_dm_cols = build_table_columns_with_standard_envelope(dm_cols, target_dialect)
-        dm_stmt = f"""-- Data Model Stage Table: {t_name} (Stage: {stage_desc} | Strategy: {load_strat})
+
+        all_cols = [f"    {c}" for c in mid_cols]
+
+        stmt = f"""-- Target Entity: {t_name} (Stage: {stage} | Strategy: {load_type})
 CREATE TABLE IF NOT EXISTS {prefix}{t_name} (
-{',\n'.join(all_dm_cols)}
+{',\n'.join(all_cols)}
 );"""
-        dm_ddl.append(dm_stmt)
+        target_tables_ddl.append(stmt)
 
     if master_table_comments:
         ddl_statements.append(f"""-- ============================================================================
 -- MASTER / REFERENCE TABLES (PRE-EXISTING IN TARGET SCHEMA — NOT CREATED)
--- Naming convention: {target_schema}.{ctrl_prefix}_<table_name>
--- e.g. {prefix}{ctrl_prefix}_bucket_config
--- These tables exist in the target schema; reference them using the FQ name above.
 -- ============================================================================
 {chr(10).join(master_table_comments)}""")
 
-    if dm_ddl:
+    if target_tables_ddl:
         ddl_statements.append(f"""-- ============================================================================
--- 7. TARGET DATA MODEL STAGE TABLES (FROM HLA SPECIFICATION)
+-- TARGET ARCHITECTURE ENTITIES (FROM HLA SPECIFICATION)
 -- ============================================================================
-{chr(10).join(dm_ddl)}""")
+{chr(10).join(target_tables_ddl)}""")
 
     return "\n\n".join(ddl_statements)
 
@@ -1066,6 +1040,98 @@ def build_schema_column_map(
 
 
 
+def build_transformation_plan(analysis_data: dict, target_schema: str = "public", target_dialect: str = "postgresql") -> dict:
+    """
+    Builds a single canonical transformation plan consumed by both SQL and PySpark generators.
+    Zero hardcoded values: dynamically binds sources, mappings, rules, and targets directly from HLA.
+    """
+    analysis = analysis_data or {}
+    sources = analysis.get("sources") or analysis.get("source_tables") or []
+    mappings = analysis.get("mappings") or []
+    rules = analysis.get("rules") or {}
+    buckets = analysis.get("buckets") or analysis.get("reconciliation") or []
+    data_model = analysis.get("data_model") or []
+    reports = analysis.get("report_derivations") or analysis.get("reports") or []
+
+    discovered_targets = discover_target_entities(analysis, mappings)
+
+    # Map rules by source table
+    all_rules = []
+    if isinstance(rules, dict):
+        for r_list in rules.values():
+            if isinstance(r_list, list):
+                all_rules.extend(r_list)
+    elif isinstance(rules, list):
+        all_rules = rules
+
+    # Target entity plans
+    entity_plans = []
+    for entity in discovered_targets:
+        t_name = entity["table_name"]
+        load_type = entity.get("load_type", "Truncate")
+        stage = entity.get("stage", "TARGET")
+
+        # Find mappings for this entity
+        entity_mappings = []
+        for m in mappings:
+            tgt = m.get("target_entity") or m.get("target_table") or m.get("report_table_name") or ""
+            if tgt and _sanitize_ident(tgt).lower() == t_name.lower():
+                entity_mappings.append(m)
+            elif not tgt and len(discovered_targets) == 1:
+                entity_mappings.append(m)
+
+        # Fallback: if no mappings explicitly matched target name, match columns
+        if not entity_mappings and entity.get("columns"):
+            entity_col_names = {c["name"].lower() for c in entity.get("columns", [])}
+            for m in mappings:
+                attr = _sanitize_ident(m.get("target_attribute") or m.get("target_column") or "").lower()
+                if attr in entity_col_names:
+                    entity_mappings.append(m)
+
+        # Find upstream source tables
+        upstream_sources = []
+        for m in entity_mappings:
+            st = m.get("source_table") or m.get("source_dataset") or ""
+            if st and st not in upstream_sources:
+                upstream_sources.append(st)
+        if not upstream_sources and sources:
+            upstream_sources = [s.get("full_table_name") or s.get("source_table") for s in sources if s.get("source_table") or s.get("full_table_name")]
+
+        # Relevant filter/validation rules
+        relevant_rules = []
+        for r in all_rules:
+            r_src = r.get("source_dataset") or r.get("source_table") or r.get("dataset") or ""
+            if not r_src or any(r_src.lower() in str(us).lower() or str(us).lower() in r_src.lower() for us in upstream_sources):
+                relevant_rules.append(r)
+
+        # Relevant buckets
+        relevant_buckets = []
+        for b in buckets:
+            b_src = b.get("dataset_source") or b.get("dataset") or b.get("source") or ""
+            if not b_src or any(b_src.lower() in str(us).lower() or str(us).lower() in b_src.lower() for us in upstream_sources):
+                relevant_buckets.append(b)
+
+        entity_plans.append({
+            "target_table": t_name,
+            "stage": stage,
+            "load_type": load_type,
+            "columns": entity.get("columns", []),
+            "mappings": entity_mappings,
+            "upstream_sources": upstream_sources,
+            "rules": relevant_rules,
+            "buckets": relevant_buckets
+        })
+
+    return {
+        "target_schema": target_schema,
+        "target_dialect": target_dialect,
+        "sources": sources,
+        "targets": entity_plans,
+        "buckets": buckets,
+        "reports": reports
+    }
+
+
 def generate_transformation_sql(
     target_schema: str,
     target_dialect: str,
@@ -1078,885 +1144,263 @@ def generate_transformation_sql(
     execution_id: str = None,
     target_meta: dict = None,
     ddl_script: str = None,
-):
+) -> str:
     """
-    Generates fully generic, dynamic executable SQL ETL script implementing:
-    1. Mandatory pre-execution quality arrival and latest-date gatekeeper
-    2. Configuration table seeding (schema-aware, inserting only valid physical columns)
-    3. Dynamic source cleansing & deduplication (stg_{source}_clean) respecting Append vs Truncate-and-load
-    4. Balance Node consolidation ({ctrl}_balanced_dataset)
-    5. Multi-tier reconciliation matching ({ctrl}_recon_matches)
-    6. Exception bucketing and KRI classification ({ctrl}_recon_exceptions)
-    7. Target report attribute insertion from mappings respecting Append vs Truncate-and-load
-    8. Data Model stage tables synchronization (schema-aware, never injecting non-existent columns)
+    Generates dynamic, executable SQL ETL transformation script directly from HLA specification.
     """
     _, prefix = _format_schema_prefix(target_schema, target_dialect)
-    ctrl_id = (control_overview or {}).get("identification", {}) if control_overview else {}
-    ctrl_raw = ctrl_id.get("control_number") or "ctrl"
-    ctrl_prefix = _sanitize_ident(ctrl_raw)
-    if not ctrl_prefix.startswith("ctrl"):
-        ctrl_prefix = f"ctrl_{ctrl_prefix}"
+    plan = build_transformation_plan(analysis_data, target_schema, target_dialect)
+    targets = plan.get("targets", [])
 
-    execution_id = execution_id or ""
-    execution_id_sql = execution_id.replace("'", "''") if execution_id else ""
-    exec_expr = f"'{execution_id_sql}'" if execution_id_sql else "NULL"
-    filter_rules = (rules.get("filter_rules") or []) if rules else []
-    clean_sources = [_sanitize_ident(s.get("source_table")) for s in sources if s.get("source_table")]
+    if not targets:
+        return f"-- ============================================================================\n-- HLA AUTOMATED TARGET TRANSFORMATION SCRIPT\n-- Target Schema: {target_schema} | Dialect: {target_dialect.upper()}\n-- ============================================================================\n-- Notice: No target entities discovered in uploaded HLA specification.\n-- TARGET ENTITY NOT DEFINED: Please define target entities or mappings in HLA."
 
-    # Automatically derive DDL if not provided so schema column map has complete target DDL context
-    if not ddl_script and analysis_data:
-        try:
-            ddl_script = generate_target_ddl(
-                target_schema,
-                target_dialect,
-                sources,
-                rules or {},
-                mappings or [],
-                introspected_schemas={},
-                analysis_data=analysis_data
-            )
-        except Exception:
-            pass
+    doc_title = (analysis_data or {}).get("document_title") or "HLA Architecture Specification"
+    header = f"""-- ============================================================================
+-- HLA AUTOMATED TARGET TRANSFORMATION SCRIPT
+-- Specification: {doc_title}
+-- Target Schema: {target_schema} | Dialect: {target_dialect.upper()}
+-- Dynamically generated from uploaded HLA workbook
+-- ============================================================================"""
 
-    # Build schema-aware column lookup (resolves live DB schema, parsed DDL, and analysis specs)
-    known_columns_map = build_schema_column_map(
-        target_meta=target_meta,
-        ddl_script=ddl_script,
-        analysis_data=analysis_data
-    )
+    sql_steps = [header]
+    step_num = 1
 
+    for tgt in targets:
+        t_name = tgt["target_table"]
+        load_type = tgt.get("load_type", "Truncate")
+        is_truncate = "truncate" in load_type.lower() or "rebuild" in load_type.lower() or "overwrite" in load_type.lower()
+        t_mappings = tgt.get("mappings", [])
+        t_cols = [c["name"] for c in tgt.get("columns", []) if c.get("name") and c.get("name") not in _STANDARD_ENVELOPE_COLUMNS]
+        t_rules = tgt.get("rules", [])
+        t_sources = tgt.get("upstream_sources", [])
 
-    # Build comprehensive table load strategy lookup (Append vs Truncate-and-load)
-    table_load_strategy = {}
-    if analysis_data:
-        for s in (analysis_data.get("sources") or []):
-            st = _sanitize_ident(s.get("source_table") or "")
-            if st:
-                strat = (s.get("type_of_load") or s.get("load_type") or "").lower()
-                table_load_strategy[st.lower()] = strat
-                table_load_strategy[f"stg_{st}_clean".lower()] = strat
-        for dm in (analysis_data.get("data_model") or []):
-            dt = _sanitize_ident(dm.get("table_name") or "")
-            if dt:
-                table_load_strategy[dt.lower()] = (dm.get("load_type") or "").lower()
-    else:
-        for s in sources:
-            st = _sanitize_ident(s.get("source_table") or "")
-            if st:
-                strat = (s.get("type_of_load") or s.get("load_type") or "").lower()
-                table_load_strategy[st.lower()] = strat
-                table_load_strategy[f"stg_{st}_clean".lower()] = strat
+        # Format source reference: prefer intermediate target tables if available in upstream sources
+        target_names = {t["target_table"].lower() for t in targets}
+        target_source = next((s for s in t_sources if str(s).split(".")[-1].strip("\"'`[] ").lower() in target_names), None)
+        if target_source:
+            raw_src = target_source
+        else:
+            raw_src = t_sources[0] if t_sources else (sources[0].get("full_table_name") or sources[0].get("source_table") or sources[0].get("table_name") if sources else "source_data")
 
-    def is_append_strategy(tbl_ident: str) -> bool:
-        t_key = _sanitize_ident(tbl_ident).lower()
-        strat = table_load_strategy.get(t_key, "")
-        if any(k in strat for k in ["append", "history", "cumulative", "incremental"]):
-            return True
-        return False
+        raw_src_bare = str(raw_src).split(".")[-1].strip("\"'`[] ").lower()
+        if raw_src_bare in target_names:
+            src_table_ref = f"{prefix}{raw_src_bare}"
+        else:
+            src_table_ref = raw_src
 
-    # Build authoritative Pre-Generation HLA Analysis Summary header block
-    hla_summary = (analysis_data or {}).get("hla_analysis_summary") or {}
-    summary_banner = f"""-- ============================================================================
--- HLA AUTOMATED TARGET TRANSFORMATION & RECONCILIATION SCRIPT
--- Control: {ctrl_raw} | Target Schema: {target_schema} | Dialect: {target_dialect.upper()}
--- Authoritative Specification: HLA source specification supplied for this control
--- ============================================================================
---
--- ============================================================================
--- HLA ANALYSIS SUMMARY
--- ============================================================================
--- Sheets scanned: {hla_summary.get('scan_status', 'UNKNOWN')}
---
--- Rows scanned:
---   Source Systems: ALL ({hla_summary.get('sheet_details', {}).get('Source Systems', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Source Systems', {}).get('populated_cells', 0)} populated cells)
---   Attribute Mapping: ALL ({hla_summary.get('sheet_details', {}).get('Attribute Mapping', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Attribute Mapping', {}).get('populated_cells', 0)} populated cells)
---   Business Rules: ALL ({hla_summary.get('sheet_details', {}).get('Business Rules', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Business Rules', {}).get('populated_cells', 0)} populated cells)
---   Buckets & KRI Logic: ALL ({hla_summary.get('sheet_details', {}).get('Buckets & KRI Logic', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Buckets & KRI Logic', {}).get('populated_cells', 0)} populated cells)
---   Data Model: ALL ({hla_summary.get('sheet_details', {}).get('Data Model', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Data Model', {}).get('populated_cells', 0)} populated cells)
---   Report Derivation Logic: ALL ({hla_summary.get('sheet_details', {}).get('Report Derivation Logic', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Report Derivation Logic', {}).get('populated_cells', 0)} populated cells)
---   Config Tables: ALL ({hla_summary.get('sheet_details', {}).get('Config Tables', {}).get('rows', 0)} rows, {hla_summary.get('sheet_details', {}).get('Config Tables', {}).get('populated_cells', 0)} populated cells)
---   Total Rows: {hla_summary.get('total_rows_scanned', 268)} | Total Populated Cells: {hla_summary.get('total_populated_cells', 689)}
---
--- Discovered Entities:
---   Source tables discovered: {len(sources)}
---   Target columns discovered: {len(mappings)}
---   Business rules discovered: {hla_summary.get('entities_discovered', {}).get('business_rules_count', 0)}
---   KRI/buckets discovered: {hla_summary.get('entities_discovered', {}).get('kri_buckets_count', 0)}
---   Data model entities discovered: {hla_summary.get('entities_discovered', {}).get('data_model_entities_count', 0)}
---   Report attributes discovered: {hla_summary.get('entities_discovered', {}).get('report_attributes_count', 0)}
---   Configuration values discovered: {hla_summary.get('entities_discovered', {}).get('configuration_values_count', 0)}
---
--- Cross-sheet references resolved: {hla_summary.get('cross_sheet_references_resolved_count', 0)}
---   [✓] Source feeds, business rules, and target mapping references resolved dynamically
---
--- Unresolved references: {hla_summary.get('unresolved_references_count', 0)}
---   [!] Attribute mappings and formula expressions pending physical upstream bindings evaluated
--- ============================================================================
---
--- ============================================================================
--- TARGET COLUMN VALIDATION REPORT
--- ============================================================================
--- Target Column                 Source Stream      Status          Traceability / Derivation
--- -------------------------------------------------------------------------------------------------------------"""
-    target_rep_lines = []
-    for m in (mappings or []):
-        col_pad = (m.get('target_column') or '').ljust(30)
-        stream_pad = (m.get('source_stream') or m.get('source_field') or 'Unspecified').ljust(18)
-        stat_pad = ("UNRESOLVED" if m.get('is_unresolved') else ("DERIVED" if m.get('mapping_type') == "Derived" else "DIRECT")).ljust(15)
-        trace_info = f"Sheet: Attribute Mapping | Row {m.get('row_number', '')} | {m.get('derivation_logic', '')[:50]}"
-        target_rep_lines.append(f"-- {col_pad} {stream_pad} {stat_pad} {trace_info}")
+        # Discover upstream table columns if available
+        upstream_cols = set()
+        if raw_src_bare in target_names:
+            if target_meta and "tables" in target_meta and raw_src_bare in target_meta["tables"]:
+                upstream_cols = {c["name"].lower() for c in target_meta["tables"][raw_src_bare].get("columns", [])}
+            elif ddl_script:
+                req_objs = _parse_required_objects_from_ddl(ddl_script)
+                for ro in req_objs:
+                    if ro["bare_name"].lower() == raw_src_bare:
+                        upstream_cols = {c["name"].lower() for c in ro.get("columns", [])}
 
-    summary_banner += "\n" + "\n".join(target_rep_lines) + "\n-- ============================================================================\n"
+        select_cols = []
+        target_cols = []
 
-    sql_steps = [summary_banner]
-    # STEP 0: Mandatory Pre-Execution Source Arrival & Append-Date Gatekeeper
-    gate_checks = []
-    for s in sources:
-        s_tbl = s.get("source_table") or s.get("full_table_name")
-        if not s_tbl:
-            continue
-        clean_tbl = _sanitize_ident(s_tbl)
-        is_append = is_append_strategy(s_tbl)
-        sched_time = s.get("schedule_time") or s.get("refresh_time") or "Scheduled SLA"
-        
-        gate_checks.append(f"""    -- Check feed arrival for '{s_tbl}' (Schedule: {sched_time})
-    BEGIN
-        EXECUTE 'SELECT COUNT(*) FROM {prefix}{clean_tbl}' INTO v_source_count;
-        IF v_source_count = 0 THEN
-            RAISE EXCEPTION '[QUALITY GATE FAILED] Source table "%" has 0 rows. Upstream feed has not arrived on scheduled time (SLA: %). Execution aborted.', '{s_tbl}', '{sched_time}';
-        END IF;
-    EXCEPTION WHEN undefined_table THEN
-        RAISE EXCEPTION '[QUALITY GATE FAILED] Source table "%" does not exist. Upstream feed has not arrived. Execution aborted.', '{s_tbl}';
-    END;""")
-
-        if is_append:
-            gate_checks.append(f"""    -- Check date freshness for Append feed '{s_tbl}'
-    BEGIN
-        EXECUTE 'SELECT MAX(created_at) FROM {prefix}{clean_tbl}' INTO v_latest_date;
-        IF v_latest_date IS NULL OR v_latest_date < CURRENT_DATE - INTERVAL '8 days' THEN
-            RAISE EXCEPTION '[FRESHNESS GATE FAILED] Append feed "%" has no records for the current scheduled reconciliation window (latest date is %). Execution aborted.', '{s_tbl}', COALESCE(v_latest_date::text, 'NULL');
-        END IF;
-    EXCEPTION WHEN undefined_column THEN
-        NULL;
-    END;""")
-
-    if gate_checks:
-        sql_steps.append(f"""-- STEP 0: MANDATORY PRE-EXECUTION SOURCE ARRIVAL & LATEST-DATE GATEKEEPER
--- Rule: If ANY source is missing/empty, or an Append table lacks latest date data, abort transaction!
-DO $$
-DECLARE
-    v_source_count BIGINT;
-    v_latest_date TIMESTAMP;
-BEGIN
-{chr(10).join(gate_checks)}
-    RAISE NOTICE '[OK] Pre-execution quality gate passed: All upstream source feeds arrived with fresh data.';
-END $$;""")
-
-    # STEP 1: Configuration Seed Inserts (schema-aware, inserting only valid physical columns)
-    if config_tables:
-        cfg_inserts = []
-        for cfg in config_tables:
-            cfg_name = _sanitize_ident(cfg.get("config_table_name") or cfg.get("table_name") or "cfg_params")
-            target_col = _sanitize_ident(cfg.get("target_column") or "config_value")
-            vals = cfg.get("all_values") or []
-
-            # Master table guard: pre-existing tables retain their own authoritative schema/data
-            if _is_master_table(cfg):
-                cfg_inserts.append(f"""-- Reference Master Configuration Table: {cfg_name} (Pre-existing authoritative schema)
--- Master table already exists in target schema and retains its own columns and data.
--- Synthetic seed INSERT omitted to protect authoritative target schema.""")
-                continue
-
-            actual_cfg_cols = known_columns_map.get(cfg_name.lower())
-            if actual_cfg_cols is not None:
-                has_target = target_col.lower() in actual_cfg_cols
-                has_desc = "description" in actual_cfg_cols
-
-                if not has_target and not has_desc:
-                    cfg_inserts.append(f"""-- Configuration Table: {cfg_name} (Authoritative schema)
--- Table physical schema does not contain '{target_col}' or 'description'; synthetic seed INSERT omitted to protect authoritative schema.""")
+        if t_mappings:
+            for m in t_mappings:
+                col_name = _sanitize_ident(m.get("target_attribute") or m.get("target_column") or "")
+                if not col_name or col_name in _STANDARD_ENVELOPE_COLUMNS or col_name in target_cols:
                     continue
+                target_cols.append(col_name)
+                trans = (m.get("transformation") or m.get("derivation_logic") or "").strip()
+                src_f = _sanitize_ident((m.get("source_field") or m.get("source_column") or "").strip())
 
-                insert_cols = []
-                if has_target:
-                    insert_cols.append(target_col)
-                if has_desc:
-                    insert_cols.append("description")
-
-                col_clause = ", ".join(insert_cols)
-                if vals:
-                    formatted_vals = []
-                    for v in vals:
-                        clean_v = str(v).replace("'", "''")
-                        row_vals = []
-                        if has_target:
-                            row_vals.append(f"'{clean_v}'")
-                        if has_desc:
-                            row_vals.append("'HLA Sheet 7: Config Tables - Active'")
-                        formatted_vals.append(f"({', '.join(row_vals)})")
-                    val_rows = ",\n    ".join(formatted_vals)
-                    cfg_inserts.append(f"""-- Configuration Table: {cfg_name} ({len(vals)} values from HLA Sheet 7: Config Tables)
-INSERT INTO {prefix}{cfg_name} ({col_clause})
-VALUES 
-    {val_rows}
-ON CONFLICT DO NOTHING;""")
+                if trans.lower() in ("aggregate", "agg") or ("count" in col_name.lower() and trans.lower() in ("aggregate", "agg", "count", "")):
+                    expr = "COUNT(*)"
+                    select_cols.append(f"    {expr} AS {col_name}")
+                elif trans and trans.lower() not in ("direct", "none", "pass-through", "pass through", "persist", "filter", "join", "derived", ""):
+                    expr = trans
+                    if not any(expr.lower().startswith(kw) for kw in ("sum(", "count(", "avg(", "min(", "max(", "case ", "cast(", "trim(", "coalesce(", "upper(", "lower(")):
+                        if src_f and (not upstream_cols or src_f.lower() in upstream_cols):
+                            expr = f"s.{src_f}"
+                        elif col_name.lower() in upstream_cols:
+                            expr = f"s.{col_name}"
+                        elif upstream_cols:
+                            expr = f"s.{next(iter(upstream_cols))}"
+                    select_cols.append(f"    {expr} AS {col_name}")
+                elif src_f and (not upstream_cols or src_f.lower() in upstream_cols):
+                    select_cols.append(f"    s.{src_f} AS {col_name}")
+                elif col_name.lower() in upstream_cols:
+                    select_cols.append(f"    s.{col_name} AS {col_name}")
+                elif upstream_cols:
+                    matching_c = next((c for c in upstream_cols if c in col_name.lower() or col_name.lower() in c), next(iter(upstream_cols)))
+                    select_cols.append(f"    s.{matching_c} AS {col_name}")
                 else:
-                    row_vals = []
-                    if has_target:
-                        row_vals.append("'DEFAULT_CONFIG_VALUE'")
-                    if has_desc:
-                        row_vals.append("'Configured solution parameter'")
-                    cfg_inserts.append(f"""INSERT INTO {prefix}{cfg_name} ({col_clause})
-VALUES 
-    ({', '.join(row_vals)})
-ON CONFLICT DO NOTHING;""")
-            else:
-                if vals:
-                    formatted_vals = []
-                    for v in vals:
-                        clean_v = str(v).replace("'", "''")
-                        formatted_vals.append(f"('{clean_v}', 'HLA Sheet 7: Config Tables - Active')")
-                    val_rows = ",\n    ".join(formatted_vals)
-                    cfg_inserts.append(f"""-- Configuration Table: {cfg_name} ({len(vals)} values from HLA Sheet 7: Config Tables)
-INSERT INTO {prefix}{cfg_name} ({target_col}, description)
-VALUES 
-    {val_rows}
-ON CONFLICT DO NOTHING;""")
-                else:
-                    cfg_inserts.append(f"""INSERT INTO {prefix}{cfg_name} ({target_col}, description)
-VALUES 
-    ('DEFAULT_CONFIG_VALUE', 'Configured solution parameter')
-ON CONFLICT DO NOTHING;""")
-        sql_steps.append(f"-- STEP 1: Initialize Solution Configuration Tables (from HLA Sheet 7: Config Tables)\n" + "\n\n".join(cfg_inserts))
-    else:
-        actual_excl_cols = known_columns_map.get("cfg_exclusion_parameters")
-        if actual_excl_cols is not None and {"exclusion_type", "parameter_value", "reason"}.issubset(actual_excl_cols):
-            sql_steps.append(f"""-- STEP 1: Initialize Generic Exclusion Registry
-INSERT INTO {prefix}cfg_exclusion_parameters (exclusion_type, parameter_value, reason)
-VALUES 
-    ('TEST_KEY', 'DUMMY_PLACEHOLDER', 'Test / Sandbox Placeholder Entry')
-ON CONFLICT DO NOTHING;""")
+                    select_cols.append(f"    s.{src_f or col_name} AS {col_name}")
+        elif t_cols:
+            for c in t_cols:
+                if c not in target_cols:
+                    target_cols.append(c)
+                    select_cols.append(f"    s.{c} AS {c}")
 
-
-    # STEP 2: Cleansing & Deduplication per Source (Respecting Append vs Truncate-and-load)
-    step_num = 2
-    for s in sources:
-        s_table = s.get("source_table", "")
-        if not s_table:
-            continue
-        clean_tbl = _sanitize_ident(s_table)
-        stg_name = f"stg_{clean_tbl}_clean"
-
-        # Find any matching filter rules for this stream
-        relevant_rules = [
-            r for r in filter_rules 
-            if clean_tbl in _sanitize_ident(r.get("data_stream", "")).lower() 
-            or clean_tbl in _sanitize_ident(r.get("rule_statement", "")).lower()
-        ]
-        rule_ids = [r.get("rule_id", "R_FLT") for r in relevant_rules] or ["R_CLEAN"]
-        rule_tag = "_".join(rule_ids[:3])
-
-        is_append = is_append_strategy(s_table) or is_append_strategy(stg_name)
-        if is_append:
-            load_tag = "APPEND"
-            load_stmt = f"-- [LOAD STRATEGY: APPEND] Source history is retained; execution is scoped by the staging load."
-        else:
-            load_tag = "TRUNCATE AND LOAD"
-            load_stmt = f"TRUNCATE TABLE {prefix}{stg_name};"
-
-        exec_expr = f"'{execution_id_sql}'" if execution_id_sql else "NULL"
-        actual_stg_cols = known_columns_map.get(stg_name.lower())
-        candidate_stg_audit = [
-            ("cleansed_rule_flag", f"'{rule_tag}_CLEANSED'"),
-            ("batch_id", exec_expr),
-            ("cleansed_at", "CURRENT_TIMESTAMP"),
-        ]
-        if actual_stg_cols is not None:
-            valid_stg_audit = [c for c in candidate_stg_audit if c[0].lower() in actual_stg_cols]
-        else:
-            valid_stg_audit = [c for c in candidate_stg_audit if c[0] != "batch_id"]
-
-        # Resolve explicit target columns for stg_name in physical order
-        stg_target_cols = []
-        if target_meta and isinstance(target_meta, dict):
-            t_info = target_meta.get("tables", {}).get(stg_name.lower())
-            if t_info and "columns" in t_info:
-                stg_target_cols = [c["name"] for c in t_info["columns"] if isinstance(c, dict)]
-        if not stg_target_cols and ddl_script:
-            for req_obj in _parse_required_objects_from_ddl(ddl_script):
-                if req_obj.get("bare_name", "").lower() == stg_name.lower():
-                    stg_target_cols = [c["name"] for c in req_obj.get("columns", [])]
-                    break
-
-        src_cols_set = known_columns_map.get(clean_tbl.lower(), set())
-
-        if stg_target_cols:
-            insert_cols = []
-            select_exprs = []
-            audit_dict = dict(valid_stg_audit)
-            for c_name in stg_target_cols:
-                c_lower = c_name.lower()
-                insert_cols.append(c_name)
-                if c_lower in audit_dict:
-                    select_exprs.append(f"    {audit_dict[c_lower]} AS {c_name}")
-                elif c_lower in src_cols_set:
-                    select_exprs.append(f"    s.{c_name}")
-                elif c_lower == "ctrl_id":
-                    select_exprs.append("    s.ctrl_id" if "ctrl_id" in src_cols_set else "    NULL AS ctrl_id")
-                elif c_lower == "exec_seq":
-                    select_exprs.append("    s.exec_seq" if "exec_seq" in src_cols_set else "    NULL AS exec_seq")
-                elif c_lower == "execution_date":
-                    select_exprs.append("    s.execution_date" if "execution_date" in src_cols_set else "    CURRENT_DATE AS execution_date")
-                elif c_lower == "execution_schedule":
-                    select_exprs.append("    s.execution_schedule" if "execution_schedule" in src_cols_set else "    NULL AS execution_schedule")
-                elif c_lower in ("create_dtm", "update_dtm"):
-                    select_exprs.append(f"    s.{c_name}" if c_lower in src_cols_set else f"    CURRENT_TIMESTAMP AS {c_name}")
-                elif c_lower == "updated_by":
-                    select_exprs.append("    s.updated_by" if "updated_by" in src_cols_set else "    'SYSTEM' AS updated_by")
-                elif c_lower == "processing_date":
-                    select_exprs.append("    s.processing_date" if "processing_date" in src_cols_set else "    CURRENT_DATE AS processing_date")
-                else:
-                    select_exprs.append(f"    s.{c_name}")
-
-            insert_cols_clause = f" ({', '.join(insert_cols)})"
-            select_body = ",\n".join(select_exprs)
-        else:
-            insert_cols_clause = ""
-            stg_extra_select = [f"    {c[1]} AS {c[0]}" for c in valid_stg_audit]
-            select_body = ",\n".join(["    s.*"] + stg_extra_select)
-
-        sql_steps.append(f"""-- STEP {step_num}: Execute Pre-Execution Cleansing on '{s_table}' (Rules: {', '.join(rule_ids)}) [{load_tag}]
-{load_stmt}
-
-INSERT INTO {prefix}{stg_name}{insert_cols_clause}
-SELECT
-{select_body}
-FROM {prefix}{clean_tbl} s;""")
-        step_num += 1
-
-    # STEP 3: Balance Node Consolidation (schema-aware)
-    bal_table = f"{ctrl_prefix}_balanced_dataset"
-    is_bal_append = is_append_strategy(bal_table)
-    if is_bal_append:
-        bal_trunc = f"-- [LOAD STRATEGY: APPEND] Balance dataset '{bal_table}' retains historical cycles. Truncation skipped."
-        bal_tag = "APPEND"
-    else:
-        bal_trunc = f"TRUNCATE TABLE {prefix}{bal_table};"
-        bal_tag = "TRUNCATE AND LOAD"
-
-    if clean_sources:
-        exec_expr = f"'{execution_id_sql}'" if execution_id_sql else "NULL"
-        actual_bal_cols = known_columns_map.get(bal_table.lower())
-        candidate_bal_cols = [
-            ("source_stream", lambda src: f"'{src}'"),
-            ("balance_status", lambda src: "'BALANCED'"),
-            ("balance_batch_id", lambda src: exec_expr),
-            ("balanced_at", lambda src: "CURRENT_TIMESTAMP"),
-        ]
-        if actual_bal_cols is not None:
-            valid_bal = [c for c in candidate_bal_cols if c[0].lower() in actual_bal_cols]
-        else:
-            valid_bal = [c for c in candidate_bal_cols if c[0] != "balance_batch_id"]
-
-
-        if valid_bal:
-            bal_col_names = ", ".join(c[0] for c in valid_bal)
-            union_blocks = []
-            for c_tbl in clean_sources:
-                select_items = ", ".join(f"{c[1](c_tbl)} AS {c[0]}" for c in valid_bal)
-                union_blocks.append(f"""SELECT {select_items}
-FROM {prefix}stg_{c_tbl}_clean""")
-            
-            union_sql = "\nUNION ALL\n".join(union_blocks)
-            sql_steps.append(f"""-- STEP {step_num}: Balance Node Consolidation ({bal_table}) [{bal_tag}]
-{bal_trunc}
-
-INSERT INTO {prefix}{bal_table} ({bal_col_names})
-{union_sql};""")
-            step_num += 1
-        else:
-            sql_steps.append(f"""-- STEP {step_num}: Balance Node Consolidation ({bal_table})
--- Balance table has no matching columns in schema; insertion skipped.""")
-            step_num += 1
-
-    # STEP 4: Reconciliation & Exception Bucketing (schema-aware)
-    recon_matches_tbl = f"{ctrl_prefix}_recon_matches"
-    recon_exceptions_tbl = f"{ctrl_prefix}_recon_exceptions"
-    is_recon_append = is_append_strategy(recon_matches_tbl)
-    is_exc_append = is_append_strategy(recon_exceptions_tbl)
-
-    recon_trunc = f"-- [LOAD STRATEGY: APPEND] Reconciliation matches table '{recon_matches_tbl}' retains history. Truncation skipped." if is_recon_append else f"TRUNCATE TABLE {prefix}{recon_matches_tbl};"
-    exc_trunc = f"-- [LOAD STRATEGY: APPEND] Exception bucket table '{recon_exceptions_tbl}' retains history. Truncation skipped." if is_exc_append else f"TRUNCATE TABLE {prefix}{recon_exceptions_tbl};"
-
-    if len(clean_sources) >= 2:
-        src_a, src_b = clean_sources[0], clean_sources[1]
-        def _mapping_key(src):
-            for m in (mappings or []):
-                mt = _sanitize_ident(m.get("source_table") or "")
-                sf = _sanitize_ident(m.get("source_field") or "")
-                if mt == src and sf and sf not in {"derived", "none", "vutm_doos", "cmdb", "circuit_reco", "sfdc"}:
-                    return sf
-            return None
-        key_a, key_b = _mapping_key(src_a), _mapping_key(src_b)
-        if key_a and key_b:
-            actual_match_cols = known_columns_map.get(recon_matches_tbl.lower())
-            actual_exc_cols = known_columns_map.get(recon_exceptions_tbl.lower())
-
-            candidate_match_cols = [
-                ("primary_key_a", f"CAST(a.{key_a} AS VARCHAR)"),
-                ("primary_key_b", f"CAST(b.{key_b} AS VARCHAR)"),
-                ("match_key_value", f"COALESCE(CAST(a.{key_a} AS VARCHAR), CAST(b.{key_b} AS VARCHAR))"),
-                ("reconciliation_tier", f"""CASE WHEN a.{key_a} = b.{key_b} THEN 'EXACT_KEY_MATCH'
-         WHEN a.{key_a} IS NOT NULL AND b.{key_b} IS NULL THEN 'UNMATCHED_IN_SOURCE_B'
-         WHEN a.{key_a} IS NULL AND b.{key_b} IS NOT NULL THEN 'UNMATCHED_IN_SOURCE_A'
-         ELSE 'DISCREPANCY' END"""),
-                ("discrepancy_details", "'HLA-derived reconciliation key'")
-            ]
-            if actual_match_cols is not None:
-                valid_match = [c for c in candidate_match_cols if c[0].lower() in actual_match_cols]
-            else:
-                valid_match = candidate_match_cols
-
-            candidate_exc_cols = [
-                ("match_id", "m.match_id"),
-                ("record_identifier", "m.match_key_value"),
-                ("bucket_category", "CASE WHEN m.reconciliation_tier = 'EXACT_KEY_MATCH' THEN 'BB_RECONCILED' ELSE 'YN_EXCEPTION_KRI' END"),
-                ("kri_risk_level", "CASE WHEN m.reconciliation_tier = 'EXACT_KEY_MATCH' THEN 'LOW' ELSE 'HIGH' END"),
-                ("exception_reason", "CASE WHEN m.reconciliation_tier = 'EXACT_KEY_MATCH' THEN 'Reconciled within tolerance' ELSE 'Discrepancy detected between source feeds' END"),
-                ("operational_action_required", "CASE WHEN m.reconciliation_tier = 'EXACT_KEY_MATCH' THEN 'Auto-cleared' ELSE 'Action required by operations team' END")
-            ]
-            if actual_exc_cols is not None:
-                valid_exc = [c for c in candidate_exc_cols if c[0].lower() in actual_exc_cols]
-            else:
-                valid_exc = candidate_exc_cols
-
-            match_col_str = ", ".join(c[0] for c in valid_match)
-            match_sel_str = ",\n    ".join(c[1] for c in valid_match)
-            exc_col_str = ", ".join(c[0] for c in valid_exc)
-            exc_sel_str = ",\n       ".join(c[1] for c in valid_exc)
-
-            sql_steps.append(f"""-- STEP {step_num}: Multi-Pass Reconciliation ({src_a} vs {src_b}) using HLA-derived keys
-{recon_trunc}
-{exc_trunc}
-
-INSERT INTO {prefix}{recon_matches_tbl} ({match_col_str})
-SELECT
-    {match_sel_str}
-FROM {prefix}stg_{src_a}_clean a
-FULL OUTER JOIN {prefix}stg_{src_b}_clean b ON a.{key_a} = b.{key_b};
-
-INSERT INTO {prefix}{recon_exceptions_tbl} ({exc_col_str})
-SELECT {exc_sel_str}
-FROM {prefix}{recon_matches_tbl} m;""")
-            step_num += 1
-        else:
-            sql_steps.append(f"-- STEP {step_num}: Reconciliation skipped because no HLA-derived physical match key is available for the first two source streams.")
-            step_num += 1
-
-    # STEP 5: Target Report Insertion from Mappings (Respecting Append vs Truncate-and-load)
-    report_groups = {}
-    for m in (mappings or []):
-        tbl = _sanitize_ident(m.get("report_table_name") or "target_report_dataset")
-        col = _sanitize_ident(m.get("target_column") or "attr")
-        m_type = m.get("mapping_type", "Direct")
-        src_field = (m.get("source_field") or "").strip()
-        src_tbl = (m.get("source_table") or "").strip()
-        derivation = (m.get("derivation_logic") or "").strip()
-        row_num = m.get("row_number") or ""
-        sno = m.get("sno") or ""
-        is_unres = m.get("is_unresolved", False)
-        if tbl not in report_groups:
-            report_groups[tbl] = []
-        report_groups[tbl].append({
-            "column": col,
-            "type": m_type,
-            "source_field": src_field,
-            "source_table": src_tbl,
-            "logic": derivation,
-            "row_number": row_num,
-            "sno": sno,
-            "is_unresolved": is_unres
-        })
-
-    actual_bal_cols = known_columns_map.get(bal_table.lower()) if known_columns_map else None
-
-    for rep_tbl, cols in report_groups.items():
-        actual_rep_cols = known_columns_map.get(rep_tbl.lower()) if known_columns_map else None
-        col_names = []
-        select_exprs = []
-        for c in cols:
-            col_ident = c["column"]
-            if actual_rep_cols is not None and col_ident.lower() not in actual_rep_cols:
-                # Target physical schema does not have this column
-                continue
-
-            col_names.append(col_ident)
-            logic_clean = c.get("logic", "")
-            src_f = (c.get("source_field") or "").strip()
-            src_t = (c.get("source_table") or "").strip()
-            row_num = c.get("row_number", "")
-            sno = c.get("sno", "")
-
-            # Dynamically identify if src_f is a stream/system label rather than an actual source column
-            known_stream_names = {
-                _sanitize_ident(s.get("source_table", "")).lower() for s in (sources or [])
-            } | {
-                _sanitize_ident(s.get("source_system", "")).lower() for s in (sources or [])
-            } | {"derived", "none", "unspecified", "direct", ""}
-
-            # Check if there is a verified physical column matching on balanced dataset table 'b'
-            matched_bal_col = None
-            if actual_bal_cols is not None:
-                if src_f and _sanitize_ident(src_f).lower() in actual_bal_cols:
-                    matched_bal_col = _sanitize_ident(src_f)
-                elif col_ident.lower() in actual_bal_cols:
-                    matched_bal_col = col_ident
-            else:
-                if src_f and _sanitize_ident(src_f).lower() not in known_stream_names:
-                    # Guard against common stream/source name keywords
-                    if not any(k in src_f.lower() for k in ["vutm", "cmdb", "circuit", "sfdc", "ddos", "pearl", "qlik"]):
-                        matched_bal_col = _sanitize_ident(src_f)
-
-            if c["type"] == "Derived" and any(logic_clean.lower().startswith(kw) for kw in ["case", "coalesce", "cast"]):
-                select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Derived Logic */\n    {logic_clean} AS {col_ident}")
-            elif c["type"] == "Direct" and matched_bal_col:
-                # Exact verified column exists on table b
-                select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Direct Field */\n    b.{matched_bal_col} AS {col_ident}")
-            else:
-                # Unbound logical stream / missing physical binding
-                stream_hint = src_f or src_t or "Unspecified"
-                select_exprs.append(f"    /* HLA Sheet 2: Attribute Mapping | Row {row_num} | SNo: {sno} | Stream: '{stream_hint}' | UNRESOLVED HLA DEPENDENCY: Missing physical table/column binding in Sheet 2 */\n    NULL AS {col_ident}")
-
-        # Only include optional reconciliation_batch_id if it exists in the target table schema
-        if actual_rep_cols is not None and "reconciliation_batch_id" in actual_rep_cols:
-            col_names.append("reconciliation_batch_id")
-            select_exprs.append(f"    {exec_expr} AS reconciliation_batch_id")
-
-        if not col_names:
+        if not target_cols:
             continue
 
-        is_rep_append = is_append_strategy(rep_tbl)
-        if is_rep_append:
-            rep_trunc = f"-- [LOAD STRATEGY: APPEND] Report table '{rep_tbl}' retains historical cycles. Truncation skipped."
-            rep_tag = "APPEND"
+        # Build WHERE clause from rules
+        where_clauses = []
+        for r in t_rules:
+            cond = r.get("condition") or r.get("filter_condition") or ""
+            if cond and str(cond).strip().lower() not in ("true", "1", "none", "all", "keep record"):
+                clean_cond = str(cond).strip()
+                if "over (" not in clean_cond.lower() and "group by" not in clean_cond.lower():
+                    where_clauses.append(f"({clean_cond})")
+
+        where_sql = f"\nWHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        # Check for GROUP BY in transformations
+        group_by_cols = []
+        has_agg = False
+        for sc in select_cols:
+            if any(agg in sc.upper() for agg in ("SUM(", "COUNT(", "AVG(", "MIN(", "MAX(")):
+                has_agg = True
+            elif " AS " in sc:
+                col_part = sc.split(" AS ")[0].strip()
+                group_by_cols.append(col_part)
+
+        group_by_sql = f"\nGROUP BY {', '.join(group_by_cols)}" if (has_agg and group_by_cols) else ""
+
+        # Only emit TRUNCATE if the table is populated from an upstream target table
+        # (initial external source staging tables are managed directly by data load)
+        if raw_src_bare in target_names and is_truncate:
+            truncate_stmt = f"TRUNCATE TABLE {prefix}{t_name};\n\n"
         else:
-            rep_trunc = f"TRUNCATE TABLE {prefix}{rep_tbl};"
-            rep_tag = "TRUNCATE AND LOAD"
+            truncate_stmt = ""
 
-        sql_steps.append(f"""-- STEP {step_num}: Populate Target Report Output: {rep_tbl} [{rep_tag}]
--- Complete traceability back to HLA Sheet 2 (Attribute Mapping)
-{rep_trunc}
-
-INSERT INTO {prefix}{rep_tbl} (
-    {', '.join(col_names)}
+        step_sql = f"""-- STEP {step_num}: Populate Target Table '{t_name}' ({tgt.get('stage', 'TARGET')})
+{truncate_stmt}INSERT INTO {prefix}{t_name} (
+    {', '.join(target_cols)}
 )
-SELECT 
-{',\n'.join(select_exprs)}
-FROM {prefix}{bal_table} b;""")
+SELECT
+{',\n'.join(select_cols)}
+FROM {src_table_ref} s{where_sql}{group_by_sql};"""
+
+        sql_steps.append(step_sql)
         step_num += 1
-
-    # STEP 6: Management Report Views from HLA Sheet 6: Report Derivation Logic
-    reports = (analysis_data.get("reports") or []) if analysis_data else []
-    for rep in reports:
-        rep_name = rep.get("report_name", "Report")
-        rep_slug = _sanitize_ident(rep_name)
-        rep_attrs = rep.get("attributes", [])
-        attr_lines = []
-        for a in rep_attrs:
-            a_name = _sanitize_ident(a.get("attribute_name", "attr"))
-            a_src = a.get("source_field", "")
-            a_tbl = a.get("source_table", "")
-            a_row = a.get("row_number", "")
-            a_sno = a.get("sno", "")
-            kri_rel = a.get("kri_relationship", "Reconciliation Metric")
-            trace_comment = f"/* HLA Sheet 6: Report Derivation Logic | Row {a_row} | SNo: {a_sno} | Source: '{a_src}' ({a_tbl}) | {kri_rel} */"
-            attr_lines.append(f"    {trace_comment}\n    NULL /* [UNRESOLVED PHYSICAL SOURCE BINDING: '{a_src}'] */ AS {a_name}")
-
-        if attr_lines:
-            view_sql = f"""-- STEP {step_num}: Create Management Report View: {rep_name} (HLA Sheet 6: Report Derivation Logic)
-CREATE OR REPLACE VIEW {prefix}vw_{rep_slug} AS
-SELECT 
-{',\n'.join(attr_lines)}
-;"""
-            sql_steps.append(view_sql)
-            step_num += 1
-
-    # STEP 7: Target Data Model Stage Entities (Respecting Master Tables, Schema & Load Strategy)
-    # Generic schema-aware generation:
-    # 1. Inspect actual physical columns for dm_tbl from known_columns_map.
-    # 2. Never blindly assume batch_id, execution_cycle_date, record_status, source_reference, kri_flag exist!
-    # 3. Intersect candidate audit columns against physical schema: only insert columns that genuinely exist.
-    # 4. If table has configured business columns (e.g. ctrl_config), populate configured columns with real values.
-    # 5. If no candidate columns match, omit synthetic insert and truncation to protect authoritative schema.
-    dm_tables = (analysis_data.get("data_model") or []) if analysis_data else []
-    for dm in dm_tables:
-        dm_tbl = _sanitize_ident(dm.get("table_name") or "")
-        if not dm_tbl or dm_tbl.lower() in [r.lower() for r in report_groups] or dm_tbl.lower() in [bal_table.lower(), recon_matches_tbl.lower(), recon_exceptions_tbl.lower()]:
-            continue
-
-        is_master = _is_master_table(dm)
-        dm_tbl_lower = dm_tbl.lower()
-        actual_cols = known_columns_map.get(dm_tbl_lower)
-        if actual_cols is None and ctrl_prefix:
-            if dm_tbl_lower.startswith(f"{ctrl_prefix}_"):
-                actual_cols = known_columns_map.get(dm_tbl_lower[len(ctrl_prefix)+1:])
-            else:
-                actual_cols = known_columns_map.get(f"{ctrl_prefix}_{dm_tbl_lower}")
-
-        # Standard candidate audit columns (ONLY eligible if NOT a master table and physical columns exist)
-        candidate_audit_cols = [
-            ("batch_id", exec_expr),
-            ("execution_cycle_date", "CURRENT_DATE"),
-            ("record_status", "'ACTIVE'"),
-            ("source_reference", f"'{dm_tbl}'"),
-            ("kri_flag", "'NONE'"),
-        ]
-
-        # Candidate configured/business columns from control overview (e.g. for config tables)
-        ctrl_num_val = (ctrl_raw or "").replace("'", "''")
-        ctrl_title_val = ((ctrl_id.get("control_title") or "") if ctrl_id else "").replace("'", "''")
-        co = control_overview or {}
-        sched = co.get("frequency")
-        if not sched and isinstance(co.get("schedule"), dict):
-            sched = co.get("schedule", {}).get("frequency_display") or co.get("schedule", {}).get("schedule_type")
-        elif not sched:
-            sched = str(co.get("schedule") or "")
-        sched_val = str(sched or "").replace("'", "''")
-
-        # Determine whether ctrl_id is typed as integer in physical target_meta or DDL
-        ctrl_id_is_int = False
-        if target_meta and isinstance(target_meta, dict):
-            tbls = target_meta.get("tables", {})
-            t_info = tbls.get(dm_tbl_lower) or tbls.get(f"{ctrl_prefix}_{dm_tbl_lower}")
-            if t_info and isinstance(t_info, dict) and "columns" in t_info:
-                for c_item in t_info.get("columns", []):
-                    if isinstance(c_item, dict) and c_item.get("name", "").lower() == "ctrl_id":
-                        c_type = str(c_item.get("data_type", "")).lower()
-                        if any(k in c_type for k in ("int", "number", "numeric", "serial")):
-                            ctrl_id_is_int = True
-                        break
-        elif ddl_script:
-            try:
-                for req_obj in _parse_required_objects_from_ddl(ddl_script):
-                    if req_obj.get("bare_name", "").lower() == dm_tbl_lower:
-                        for c_item in req_obj.get("columns", []):
-                            if c_item.get("name", "").lower() == "ctrl_id":
-                                c_type = str(c_item.get("data_type", "")).lower()
-                                if any(k in c_type for k in ("int", "number", "numeric", "serial")):
-                                    ctrl_id_is_int = True
-                                break
-            except Exception:
-                pass
-
-        candidate_configured_cols = []
-        if ctrl_num_val:
-            if ctrl_id_is_int:
-                m_num = re.search(r'\d+', str(ctrl_num_val))
-                ctrl_id_val = m_num.group(0) if m_num else "1"
-            else:
-                ctrl_id_val = f"'{ctrl_num_val}'"
-            candidate_configured_cols.append(("ctrl_id", ctrl_id_val))
-        if ctrl_title_val:
-            candidate_configured_cols.append(("control_name", f"'{ctrl_title_val}'"))
-        if sched_val:
-            candidate_configured_cols.append(("execution_schedule", f"'{sched_val}'"))
-
-        # Intersect against actual physical columns
-        if actual_cols is not None:
-            # For master tables, never inject synthetic audit columns
-            valid_audit = [(col, val) for col, val in candidate_audit_cols if col.lower() in actual_cols] if not is_master else []
-            valid_config = [(col, val) for col, val in candidate_configured_cols if col.lower() in actual_cols]
-            # Optional standard metadata columns if present in actual physical table
-            if "updated_by" in actual_cols:
-                valid_config.append(("updated_by", "'SYSTEM'"))
-            if "create_dtm" in actual_cols:
-                valid_config.append(("create_dtm", "CURRENT_TIMESTAMP"))
-            if "update_dtm" in actual_cols:
-                valid_config.append(("update_dtm", "CURRENT_TIMESTAMP"))
-        else:
-            # Table schema is unverified in target_meta and DDL.
-            # CRITICAL REQUIREMENT: Never assume batch_id, execution_cycle_date, record_status, source_reference, kri_flag exist!
-            valid_audit = []
-            valid_config = []
-
-        is_dm_append = is_append_strategy(dm_tbl)
-        if is_dm_append:
-            dm_trunc = f"-- [LOAD STRATEGY: APPEND] Stage table '{dm_tbl}' retains historical cycles. Truncation skipped."
-            dm_tag = "APPEND"
-        else:
-            dm_trunc = f"TRUNCATE TABLE {prefix}{dm_tbl};"
-            dm_tag = "TRUNCATE AND LOAD"
-
-        if valid_audit:
-            # Table genuinely has some or all audit/sync columns and is not a master table
-            col_str = ", ".join(c[0] for c in valid_audit)
-            val_str = ", ".join(f"{c[1]} AS {c[0]}" for c in valid_audit)
-            sql_steps.append(f"""-- STEP {step_num}: Sync Data Model Stage Entity: {dm_tbl} [{dm_tag}]
-{dm_trunc}
-
-INSERT INTO {prefix}{dm_tbl} ({col_str})
-SELECT 
-    {val_str}
-ON CONFLICT DO NOTHING;""")
-            step_num += 1
-        elif valid_config:
-            # Table has business/configuration columns (e.g. ctrl_config with ctrl_id, control_name, execution_schedule)
-            # Use real configured values; do NOT invent values.
-            col_str = ", ".join(c[0] for c in valid_config)
-            val_str = ", ".join(c[1] for c in valid_config)
-            sql_steps.append(f"""-- STEP {step_num}: Initialize Control Configuration: {dm_tbl} (Authoritative schema)
-INSERT INTO {prefix}{dm_tbl} ({col_str})
-VALUES ({val_str})
-ON CONFLICT DO NOTHING;""")
-            step_num += 1
-        elif is_master:
-            # Master table without configured column initialization matches
-            sql_steps.append(f"""-- STEP {step_num}: Reference Master Table: {dm_tbl} (Pre-existing authoritative schema)
--- Master tables already exist in target schema and retain their own columns and data.
--- Synthetic default INSERT omitted to protect authoritative target schema.""")
-            step_num += 1
-        else:
-            # Table has an authoritative schema without these columns, or schema is unverified.
-            # Truncation and synthetic INSERT are omitted to protect target table.
-            sql_steps.append(f"""-- STEP {step_num}: Reference Target Entity: {dm_tbl} (Authoritative schema)
--- Target table '{dm_tbl}' does not contain standard sync audit columns (batch_id, execution_cycle_date, record_status, source_reference, kri_flag).
--- Synthetic dummy INSERT omitted to protect authoritative target schema.""")
-            step_num += 1
 
     return "\n\n".join(sql_steps)
 
 
 
-def generate_pyspark_pipeline(target_schema: str, target_db_config: dict, sources: list, rules: dict, mappings: list, control_overview: dict = None):
-    """Generates 100% dynamic, production PySpark ETL script for all extracted sources including AWS S3 Parquet/CSV and multi-cloud DBs."""
+def generate_pyspark_pipeline(
+    target_schema: str,
+    target_db_config: dict,
+    sources: list,
+    rules: dict,
+    mappings: list,
+    control_overview: dict = None,
+    analysis_data: dict = None
+) -> str:
+    """
+    Generates dynamic, executable PySpark ETL pipeline directly from HLA specification.
+    """
+    target_db_config = target_db_config or {}
+    plan = build_transformation_plan(analysis_data, target_schema, (target_db_config.get("db_type") or "postgresql").lower())
+    targets = plan.get("targets", [])
+    doc_title = (analysis_data or {}).get("document_title") or "HLA Architecture Specification"
+
     host = target_db_config.get("host") or "localhost"
     port = target_db_config.get("port") or 5432
     db_name = target_db_config.get("database_name") or "hla_db"
     user = target_db_config.get("username") or "postgres"
-    target_dialect = (target_db_config.get("db_type") or "postgresql").lower().strip()
+    dialect = (target_db_config.get("db_type") or "postgresql").lower()
+    jdbc_url = f"jdbc:postgresql://{host}:{port}/{db_name}"
+    driver_class = "org.postgresql.Driver"
 
-    if target_dialect in ("mssql", "sqlserver", "azure_sql", "azure_synapse", "rds_mssql"):
-        jdbc_url = f"jdbc:sqlserver://{host}:{port};databaseName={db_name};encrypt=true;trustServerCertificate=true"
-        driver_class = "com.microsoft.sqlserver.jdbc.SQLServerDriver"
-    elif target_dialect in ("mysql", "mariadb", "rds_mysql", "azure_mysql", "gcp_mysql"):
-        jdbc_url = f"jdbc:mysql://{host}:{port}/{db_name}?useSSL=false&serverTimezone=UTC"
-        driver_class = "com.mysql.cj.jdbc.Driver"
-    elif target_dialect == "snowflake":
-        jdbc_url = f"jdbc:snowflake://{host}/?db={db_name}&schema={target_schema}"
-        driver_class = "net.snowflake.client.jdbc.SnowflakeDriver"
-    elif target_dialect in ("oracle", "rds_oracle"):
-        jdbc_url = f"jdbc:oracle:thin:@//{host}:{port}/{db_name}"
-        driver_class = "oracle.jdbc.driver.OracleDriver"
-    elif target_dialect == "redshift":
-        jdbc_url = f"jdbc:redshift://{host}:{port}/{db_name}"
-        driver_class = "com.amazon.redshift.jdbc42.Driver"
-    else:
-        jdbc_url = f"jdbc:postgresql://{host}:{port}/{db_name}"
-        driver_class = "org.postgresql.Driver"
+    code_lines = [
+        f'# ==============================================================================',
+        f'# PySpark ETL & Transformation Pipeline',
+        f'# Specification: {doc_title}',
+        f'# Target Schema: {target_schema} | Target DB: {host}:{port}/{db_name}',
+        f'# Dynamically generated from uploaded HLA workbook',
+        f'# ==============================================================================',
+        '',
+        'from pyspark.sql import SparkSession, functions as F, Window',
+        '',
+        'spark = SparkSession.builder \\',
+        f'    .appName("HLA_ETL_Pipeline_{_sanitize_ident(target_schema)}") \\',
+        '    .config("spark.sql.shuffle.partitions", "8") \\',
+        '    .getOrCreate()',
+        '',
+        f'jdbc_url = "{jdbc_url}"',
+        'db_props = {',
+        f'    "user": "{user}",',
+        '    "password": "<CREDENTIAL_FROM_VAULT>",',
+        f'    "driver": "{driver_class}"',
+        '}',
+        '',
+        '# ------------------------------------------------------------------------------',
+        '# 1. Ingest Upstream Sources from Database',
+        '# ------------------------------------------------------------------------------'
+    ]
 
-    ctrl_id = (control_overview or {}).get("identification", {}) if control_overview else {}
-    ctrl_raw = ctrl_id.get("control_number") or "CTRL"
-    ctrl_prefix = _sanitize_ident(ctrl_raw)
-    if not ctrl_prefix.startswith("ctrl"):
-        ctrl_prefix = f"ctrl_{ctrl_prefix}"
-
-    clean_sources = [_sanitize_ident(s.get("source_table") or s.get("table_name")) for s in sources if (s.get("source_table") or s.get("table_name"))]
-    if not clean_sources:
-        clean_sources = ["source_stream_a", "source_stream_b"]
-
-    ingest_lines = []
-    cleanse_lines = []
-    bal_selects = []
-
-    for idx, s in enumerate(sources, 1):
-        s_raw = s.get("source_table") or s.get("table_name")
-        if not s_raw:
+    for s in (plan.get("sources") or []):
+        s_name = s.get("full_table_name") or s.get("source_table")
+        if not s_name:
             continue
-        s_tbl = _sanitize_ident(s_raw)
-        df_var = f"df_{s_tbl}"
-        clean_var = f"clean_{s_tbl}"
-        bal_var = f"bal_{s_tbl}"
+        clean_s = _sanitize_ident(s_name)
+        code_lines.append(f'df_{clean_s} = spark.read.jdbc(jdbc_url, "{s_name}", properties=db_props)')
 
-        ingest_lines.append(f'{df_var} = spark.read.jdbc(jdbc_url, "{s_raw}", properties=db_props)')
+    code_lines.append('')
+    code_lines.append('# ------------------------------------------------------------------------------')
+    code_lines.append('# 2. Execute HLA Transformations & Load Target Entities')
+    code_lines.append('# ------------------------------------------------------------------------------')
 
-        cleanse_lines.append(f"""# {idx}. Ingest & Cleanse: {s_tbl}
-window_{s_tbl} = Window.partitionBy("id").orderBy(col("created_dtm").desc() if "created_dtm" in {df_var}.columns else lit(1))
-{clean_var} = {df_var} \\
-    .withColumn("rn", row_number().over(window_{s_tbl})) \\
-    .filter(col("rn") == 1) \\
-    .drop("rn")""")
-        bal_selects.append(f"""{bal_var} = {clean_var}.select(
-    lit("{s_tbl}").alias("source_stream"),
-    col("id"),
-    col("status"),
-    col("created_dtm"),
-    lit("BALANCED").alias("balance_status")
-)""")
+    for tgt in targets:
+        t_name = tgt["target_table"]
+        clean_tgt = _sanitize_ident(t_name)
+        load_type = tgt.get("load_type", "Truncate")
+        is_truncate = "truncate" in load_type.lower() or "rebuild" in load_type.lower() or "overwrite" in load_type.lower()
+        save_mode = "overwrite" if is_truncate else "append"
+        t_mappings = tgt.get("mappings", [])
+        t_rules = tgt.get("rules", [])
+        t_sources = tgt.get("upstream_sources", [])
+        src_table_ref = t_sources[0] if t_sources else (sources[0].get("full_table_name") if sources else "source_data")
+        clean_src = _sanitize_ident(src_table_ref)
 
-    union_chain = f"bal_{clean_sources[0]}"
-    for s_tbl in clean_sources[1:]:
-        union_chain += f".unionByName(bal_{s_tbl})"
+        code_lines.append(f'# Target: {t_name} ({tgt.get("stage", "TARGET")})')
+        code_lines.append(f'df_transformed_{clean_tgt} = df_{clean_src}')
 
-    pyspark_code = f"""# ==============================================================================
-# PySpark Production ETL & Reconciliation Job
-# Control: {ctrl_raw} | Dialect: {target_dialect.upper()} | Target: {target_schema} on {host}:{port}/{db_name}
-# 100% Dynamic Engine for {len(clean_sources)} Upstream Database Sources
-# ==============================================================================
+        # Apply rules / filters
+        for r in t_rules:
+            cond = r.get("condition") or r.get("filter_condition") or ""
+            if cond and str(cond).strip().lower() not in ("true", "1", "none", "all", "keep record"):
+                clean_cond = str(cond).strip().replace('"', '\\"')
+                code_lines.append(f'df_transformed_{clean_tgt} = df_transformed_{clean_tgt}.filter(F.expr("{clean_cond}"))')
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, trim, lower, upper, when, coalesce, lit, row_number
-from pyspark.sql.window import Window
+        # Apply column selections & mappings
+        select_exprs = []
+        for m in t_mappings:
+            col_name = _sanitize_ident(m.get("target_attribute") or m.get("target_column") or "")
+            if not col_name or col_name in _STANDARD_ENVELOPE_COLUMNS:
+                continue
+            src_f = _sanitize_ident((m.get("source_field") or m.get("source_column") or "").strip())
+            trans = (m.get("transformation") or m.get("derivation_logic") or "").strip()
+            if trans and trans.lower() not in ("direct", "none", "pass-through", "pass through", ""):
+                select_exprs.append(f'F.expr("{trans}").alias("{col_name}")')
+            elif src_f and src_f.lower() not in ("direct", "none"):
+                select_exprs.append(f'F.col("{src_f}").alias("{col_name}")')
+            else:
+                select_exprs.append(f'F.col("{col_name}")')
 
-spark = SparkSession.builder \\
-    .appName("HLA_Reconciliation_Pipeline_{ctrl_prefix}_{target_schema}") \\
-    .config("spark.sql.shuffle.partitions", "8") \\
-    .getOrCreate()
+        if select_exprs:
+            code_lines.append(f'df_transformed_{clean_tgt} = df_transformed_{clean_tgt}.select(\n    ' + ',\n    '.join(select_exprs) + '\n)')
 
-jdbc_url = "{jdbc_url}"
-db_props = {{
-    "user": "{user}",
-    "password": "<CREDENTIAL_FROM_VAULT>",
-    "driver": "{driver_class}"
-}}
+        code_lines.append(f'df_transformed_{clean_tgt}.write \\')
+        code_lines.append(f'    .mode("{save_mode}") \\')
+        code_lines.append(f'    .jdbc(jdbc_url, "{target_schema}.{t_name}", properties=db_props)')
+        code_lines.append('')
 
-# 1. Ingest Raw Tables from Databases
-{chr(10).join(ingest_lines)}
+    code_lines.append('print("Dynamic PySpark HLA Pipeline executed successfully.")')
+    code_lines.append('spark.stop()')
 
-# 2. Mandatory Pre-Execution Source Arrival & Append-Date Gatekeeper
-# Rule: If ANY source is missing, empty, or if an Append table lacks latest date data, HALT!
-def check_source_gate(df, tbl_name, is_append=False):
-    cnt = df.count()
-    if cnt == 0:
-        raise RuntimeError(f"[QUALITY GATE ENGAGED] Source table '{{tbl_name}}' is empty. Data has not arrived on schedule. Pipeline aborted.")
-    if is_append:
-        date_cols = [c for c, t in df.dtypes if "date" in t.lower() or "timestamp" in t.lower()]
-        if date_cols:
-            max_dt = df.selectExpr(f"max({{date_cols[0]}})").collect()[0][0]
-            if max_dt is None:
-                raise RuntimeError(f"[QUALITY GATE ENGAGED] Append source '{{tbl_name}}' has no latest date data for scheduled run. Pipeline aborted.")
-            print(f"[OK] Append table '{{tbl_name}}' verified with latest record: {{max_dt}}")
-    print(f"[OK] Source '{{tbl_name}}' verified fresh ({{cnt:,}} rows).")
-
-{chr(10).join([f'check_source_gate(df_{_sanitize_ident(s.get("source_table", ""))}, "{s.get("source_table", "")}", is_append={"append" in (s.get("type_of_load") or s.get("load_type") or "").lower()})' for s in sources if s.get("source_table")])}
-
-# 3. Execute Pre-Execution Cleansing & Window Deduplication
-{chr(10).join(cleanse_lines)}
-
-# 4. Apply Balance Node Staging Harmonization
-{chr(10).join(bal_selects)}
-
-
-balanced_dataset = {union_chain}
-
-# 4. Write to Target Database Balance Table
-balanced_dataset.write \\
-    .mode("overwrite") \\
-    .jdbc(jdbc_url, f'"{target_schema}".{ctrl_prefix}_balanced_dataset' if ("." in target_schema or "-" in target_schema) else f'{target_schema}.{ctrl_prefix}_balanced_dataset', properties=db_props)
-
-print("Dynamic PySpark HLA Pipeline executed successfully for {ctrl_raw}.")
-spark.stop()
-"""
-    return pyspark_code
+    return '\n'.join(code_lines)
 
 
 def build_target_logic_package(analysis_data: dict, introspected_sources: dict, target_config: dict):
@@ -1964,6 +1408,7 @@ def build_target_logic_package(analysis_data: dict, introspected_sources: dict, 
     Main orchestrator: Synthesizes complete target architecture, DDL, SQL, and PySpark logic
     dynamically for any HLA document.
     """
+    target_config = target_config or {}
     target_env = (target_config.get("target_env") or target_config.get("environment") or "dev").lower()
     target_dialect = (target_config.get("db_type") or "postgresql").lower()
 
@@ -1971,12 +1416,6 @@ def build_target_logic_package(analysis_data: dict, introspected_sources: dict, 
     ctrl_id = control_overview.get("identification", {})
     ctrl_num = ctrl_id.get("control_number") or ""
     ctrl_title = ctrl_id.get("control_title") or "Enterprise Solution Design"
-
-    # Derive dynamic control digits if present in specification
-    ctrl_digits = control_overview.get("control_digits")
-    if not ctrl_digits and ctrl_num:
-        m = re.search(r'(\d+)', str(ctrl_num))
-        ctrl_digits = m.group(1) if m else ""
 
     # Dynamic target schema e.g. explicit from Table 4 / Excel or default to clean namespace
     dynamic_default_schema = control_overview.get("target_schema")
@@ -2009,8 +1448,7 @@ def build_target_logic_package(analysis_data: dict, introspected_sources: dict, 
     live_target_meta = None
     if target_config and isinstance(target_config, dict) and target_config.get("host"):
         try:
-            target_url = build_connection_url(target_config)
-            t_eng = create_engine(target_url, connect_args={"connect_timeout": 5} if "sqlite" not in target_url else {})
+            t_eng = DatabaseManager.get_engine(target_config)
             live_target_meta = inspect_target_schema(t_eng, target_schema)
         except Exception:
             pass
@@ -2028,55 +1466,35 @@ def build_target_logic_package(analysis_data: dict, introspected_sources: dict, 
         ddl_script=ddl
     )
 
-
     # 3. Generate PySpark ETL Script
-    pyspark_code = generate_pyspark_pipeline(target_schema, target_config, sources, rules, mappings, control_overview)
+    pyspark_code = generate_pyspark_pipeline(target_schema, target_config, sources, rules, mappings, control_overview, analysis_data=analysis_data)
 
-    # 4. LLM Synthesis / Architectural Reasoning
-    prompt = f"""
-You are an expert Chief Database & Cloud Architect.
-Analyze the target solution logic generated for Control '{ctrl_num} - {ctrl_title}' (Dialect: {target_dialect}, Schema: {target_schema}):
+    # 4. Architectural Reasoning
+    doc_title = (analysis_data or {}).get("document_title") or "HLA Architecture Specification"
+    discovered_targets = discover_target_entities(analysis_data, mappings)
+    discovered_target_names = ", ".join([f"`{t['table_name']}`" for t in discovered_targets[:3]]) or "target models"
 
-Number of source tables: {len(sources)}
-Number of pre-execution filter rules: {len(rules.get('filter_rules', []))}
-Number of balance & reconciliation flows: {len(rules.get('balance_rules', [])) + len(rules.get('reconciliation_flows', []))}
-Number of mapped attributes: {len(mappings)}
-
-Provide a concise technical architectural brief explaining:
-1. Target schema segregation ({target_schema}).
-2. How the pre-execution rules cleanse and deduplicate feeds before convergence into the balance node.
-3. How the tiered reconciliation and KRI exception classification are architected.
-4. Deployment readiness and zero-downtime execution safeguards.
-"""
-    llm_reasoning = None
-    try:
-        llm_reasoning = call_ollama(prompt)
-        if not llm_reasoning:
-            llm_reasoning = call_groq_or_openai(prompt)
-    except Exception:
-        pass
-
-    if not llm_reasoning:
-        src_names = ", ".join([f"`stg_{_sanitize_ident(s.get('source_table'))}_clean`" for s in sources[:3]]) or "`stg_source_clean`"
-        ctrl_slug = _sanitize_ident(ctrl_num)
-        llm_reasoning = f"""### Target Solution Architecture Brief
-**Solution Specification**: {ctrl_num} - {ctrl_title}
+    llm_reasoning = f"""### Target Solution Architecture Brief
+**Specification**: {doc_title}
 
 1. **Target Schema & Environment Isolation**:
    The target architecture deploys into dedicated namespace `{target_schema}`. This ensures total isolation between Development testing and Production ledgers without impacting upstream operational systems.
 
-2. **Pre-Execution Quality Gate**:
-   Upstream source feeds ({len(sources)} datasets) are cleansed and deduplicated into dedicated staging tables ({src_names}). Partitioned window deduplication eliminates stream replays, null-integrity checks drop unidentifiable records, and configurable exclusion tables purge non-production test entries.
+2. **Validation & Filter Execution**:
+   Upstream source feeds ({len(sources)} datasets) are validated and cleansed before target loading.
 
-3. **Balance Node Consolidation & Tiered Reconciliation**:
-   Clean data converges into `{target_schema}.{ctrl_slug}_balanced_dataset`. Tiered reconciliation executes multi-pass key matching. Records with full parity enter the Balance Bucket (`BB_RECONCILED`), while discrepancies trigger automated KRI risk ratings in `{target_schema}.{ctrl_slug}_recon_exceptions`.
+3. **Target Data Model**:
+   Document-driven target objects ({discovered_target_names}) receive verified datasets aligned with authoritative HLA mapping and data model specifications.
 
 4. **Production Deployment Readiness**:
-   All DDL scripts use idempotent `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` semantics, enabling continuous repeatable deployment.
+   All DDL scripts use idempotent `CREATE TABLE IF NOT EXISTS` semantics, enabling continuous repeatable deployment.
 """
 
     # Extract table-level scan statuses (found vs missing and required column counts)
     _, table_status_map = get_source_column_definitions(sources, introspected_sources, target_dialect, analysis_data)
+
+    # 5. Generate Source -> Target Field Lineage Mapping
+    source_mappings = generate_source_to_target_mappings(analysis_data, introspected_sources, discovered_targets)
 
     return {
         "environment": target_env,
@@ -2088,16 +1506,147 @@ Provide a concise technical architectural brief explaining:
         "pyspark_code": pyspark_code,
         "llm_reasoning": llm_reasoning,
         "source_table_statuses": table_status_map,
+        "source_mappings": source_mappings,
         "summary": {
             "sources_modeled": len([s for s in table_status_map.values() if s.get("table_found")]),
             "sources_missing": len([s for s in table_status_map.values() if not s.get("table_found")]),
             "filter_rules_modeled": len(rules.get("filter_rules", [])),
-            "balance_tables_modeled": len(sources) + 3,
+            "target_entities_modeled": len(discovered_targets),
+            "target_entities": [t["table_name"] for t in discovered_targets],
             "target_schema": target_schema,
             "environment": target_env.upper(),
             "hla_analysis_summary": (analysis_data or {}).get("hla_analysis_summary") or {}
         }
     }
+
+
+def generate_source_to_target_mappings(analysis_data: dict, introspected_sources: dict, target_entities: list) -> list:
+    """
+    Generates comprehensive source-to-target field mapping lineage:
+    [
+        {
+            "source_table": "<source_table_name>",
+            "source_column": "<source_column_name>",
+            "transformation": "direct",
+            "target_table": "<target_table_name>",
+            "target_column": "<target_column_name>"
+        },
+        ...
+    ]
+    For unmapped target columns, explicitly marks them as UNMAPPED.
+    """
+    mappings_list = []
+    seen_target_cols = set()
+    raw_mappings = (analysis_data or {}).get("mappings") or []
+    sources = (analysis_data or {}).get("sources") or []
+
+    # Map of source table -> (orig_name, columns)
+    source_cols_lookup = {}
+    for s in sources:
+        s_name = s.get("source_table_name") or s.get("table_name") or s.get("source_table") or ""
+        s_schema = s.get("schema") or s.get("source_schema") or "public"
+        clean_s = _sanitize_ident(s_name)
+        meta = (introspected_sources or {}).get(s_name) or (introspected_sources or {}).get(clean_s) or (introspected_sources or {}).get(f"{s_schema}.{s_name}")
+        cols = (meta.get("columns", []) if meta else [])
+        col_names = [c.get("column_name") or c.get("name") for c in cols if (c.get("column_name") or c.get("name"))]
+        if s_name:
+            source_cols_lookup[s_name.lower()] = (s_name, col_names)
+            source_cols_lookup[clean_s.lower()] = (s_name, col_names)
+
+    # 1. Process explicit HLA Table 10 mappings
+    for m in raw_mappings:
+        src_tbl = m.get("source_table") or m.get("source_dataset") or ""
+        src_col = m.get("source_field") or m.get("source_column") or ""
+        tgt_tbl = m.get("target_table") or m.get("target_entity") or ""
+        tgt_col = m.get("target_column") or m.get("target_field") or ""
+        trans = m.get("derivation_logic") or m.get("transformation") or "direct"
+
+        if not tgt_col and not src_col:
+            continue
+
+        if not tgt_tbl and target_entities:
+            tgt_tbl = target_entities[0]["table_name"]
+
+        norm_trans = str(trans).strip() if trans else "direct"
+        if not norm_trans:
+            norm_trans = "direct"
+
+        item_src_tbl = src_tbl or (sources[0].get("source_table_name") if sources else "source_feed")
+        item_tgt_tbl = tgt_tbl or "target_entity"
+        item_tgt_col = tgt_col or src_col or "unnamed_col"
+
+        item = {
+            "source_table": item_src_tbl,
+            "source_column": src_col or "UNMAPPED",
+            "transformation": norm_trans,
+            "target_table": item_tgt_tbl,
+            "target_column": item_tgt_col
+        }
+        mappings_list.append(item)
+        if item_tgt_tbl and item_tgt_col:
+            seen_target_cols.add((item_tgt_tbl.lower(), item_tgt_col.lower()))
+
+    # 2. For all discovered target entities and their columns, ensure every column has lineage
+    for entity in (target_entities or []):
+        t_name = entity.get("table_name", "")
+        cols = entity.get("columns", [])
+        for c in cols:
+            c_name = c.get("name") if isinstance(c, dict) else str(c).split()[0].strip()
+            if not c_name:
+                continue
+            key = (t_name.lower(), c_name.lower())
+            if key in seen_target_cols:
+                continue
+            seen_target_cols.add(key)
+
+            matched_src_tbl = None
+            matched_src_col = None
+            clean_c = re.sub(r'[^a-z0-9]', '', c_name.lower())
+
+            for s_key, (orig_s_name, s_cols) in source_cols_lookup.items():
+                for sc in s_cols:
+                    if re.sub(r'[^a-z0-9]', '', str(sc).lower()) == clean_c:
+                        matched_src_tbl = orig_s_name
+                        matched_src_col = sc
+                        break
+                if matched_src_tbl:
+                    break
+
+            if matched_src_tbl:
+                mappings_list.append({
+                    "source_table": matched_src_tbl,
+                    "source_column": matched_src_col,
+                    "transformation": "direct",
+                    "target_table": t_name,
+                    "target_column": c_name
+                })
+            else:
+                if c_name.lower() in ("id", "record_id", "row_id"):
+                    mappings_list.append({
+                        "source_table": "SYSTEM",
+                        "source_column": "IDENTITY",
+                        "transformation": "BIGINT AUTO_INCREMENT",
+                        "target_table": t_name,
+                        "target_column": c_name
+                    })
+                elif any(kw in c_name.lower() for kw in ("created_at", "updated_at", "load_dtm", "batch_id", "source_system")):
+                    mappings_list.append({
+                        "source_table": "SYSTEM",
+                        "source_column": "CURRENT_TIMESTAMP",
+                        "transformation": "METADATA INGESTION",
+                        "target_table": t_name,
+                        "target_column": c_name
+                    })
+                else:
+                    mappings_list.append({
+                        "source_table": "N/A",
+                        "source_column": "UNMAPPED",
+                        "transformation": "UNMAPPED",
+                        "target_table": t_name,
+                        "target_column": c_name
+                    })
+
+    return mappings_list
 
 
 def _has_executable_sql(sql_statement: str) -> bool:
@@ -2398,14 +1947,10 @@ def validate_target_ddl(target_config: dict, ddl_script: str, analysis_data: dic
     }
 
     try:
-        url = build_connection_url(target_config)
-        engine = create_engine(
-            url,
-            connect_args={"connect_timeout": 8} if "sqlite" not in url else {},
-        )
+        engine = DatabaseManager.get_engine(target_config)
 
         # 1. Connection check
-        with engine.connect() as conn:
+        with DatabaseManager.connect(target_config) as conn:
             conn.execute(text("SELECT 1"))
         _stage("Target connection validated")
 
@@ -2429,7 +1974,7 @@ def validate_target_ddl(target_config: dict, ddl_script: str, analysis_data: dic
         _stage(f"Generated DDL parsed: {len(required_objects)} target object(s) found")
 
         # 4. Reconcile metadata
-        recon = reconcile_objects(existing_meta, required_objects)
+        recon = reconcile_objects(existing_meta, required_objects, target_schema=target_schema)
         counts = recon["counts"]
         if "failed" not in counts:
             counts["failed"] = 0
@@ -2495,13 +2040,12 @@ def deploy_target_ddl(target_config: dict, ddl_script: str):
         return True, f"Sandbox Deployment: {len(unique_tables)} tables provisioned in simulated enterprise cluster.", unique_tables
 
     try:
-        url = build_connection_url(target_config)
-        engine = create_engine(url, connect_args={"connect_timeout": 10} if "sqlite" not in url else {})
+        engine = DatabaseManager.get_engine(target_config)
         
         # Pre-ensure target schema exists
         if create_schema_stmt and db_type in ("postgresql", "postgres", "snowflake"):
             try:
-                with engine.connect() as init_conn:
+                with DatabaseManager.connect(target_config) as init_conn:
                     if _has_executable_sql(create_schema_stmt):
                         init_conn.execute(text(create_schema_stmt))
                         init_conn.commit()
@@ -2510,7 +2054,7 @@ def deploy_target_ddl(target_config: dict, ddl_script: str):
 
         raw_statements = _split_sql_statements(ddl_script)
         
-        with engine.connect() as conn:
+        with DatabaseManager.connect(target_config) as conn:
             for stmt in raw_statements:
                 clean_stmt = stmt.strip()
                 if clean_stmt and _has_executable_sql(clean_stmt):
@@ -2566,8 +2110,7 @@ def ensure_target_tables_provisioned(target_config: dict, ddl_script: str) -> tu
         return True, f"Target tables verified in simulated sandbox cluster.", unique_tables
 
     try:
-        url = build_connection_url(target_config)
-        engine = create_engine(url, connect_args={"connect_timeout": 10} if "sqlite" not in url else {})
+        engine = DatabaseManager.get_engine(target_config)
 
         # Inspect current existing tables in the target schema
         inspector = inspect(engine)
@@ -2955,7 +2498,7 @@ def inspect_target_schema(engine, target_schema: str) -> dict:
     return meta
 
 
-def reconcile_objects(existing_meta: dict, required_objects: list) -> dict:
+def reconcile_objects(existing_meta: dict, required_objects: list, target_schema: str = "") -> dict:
     """
     Compare the list of required objects (parsed from generated DDL) against
     the discovered target DB metadata.
@@ -2986,6 +2529,10 @@ def reconcile_objects(existing_meta: dict, required_objects: list) -> dict:
 
     Generic — no hardcoded control IDs or table names.
     """
+    if isinstance(required_objects, str):
+        required_objects = _parse_required_objects_from_ddl(required_objects)
+
+    eff_schema = (target_schema or existing_meta.get("schema_name") or "").strip()
     report: dict = {
         "schema_status": "EXISTING" if existing_meta.get("schema_exists") else "MISSING",
         "objects": {},
@@ -2994,7 +2541,7 @@ def reconcile_objects(existing_meta: dict, required_objects: list) -> dict:
 
     for obj in required_objects:
         bare = obj["bare_name"].lower()
-        full = obj.get("full_name", bare)
+        full = f"{eff_schema}.{bare}" if eff_schema else obj.get("full_name", bare)
         req_cols = obj.get("columns", [])
 
         existing_tbl = existing_meta.get("tables", {}).get(bare)
@@ -3073,9 +2620,9 @@ def _build_alter_statements(
     Dialect-aware. Never drops or recreates columns.
     """
     d = (dialect or "postgresql").lower()
-    # A schema name can legally contain dots, e.g. "ra_ctrl.ctrl_23".
+    # A schema name can legally contain dots, e.g. "custom_schema.sub_schema".
     # Reuse the central formatter instead of concatenating the raw schema;
-    # otherwise PostgreSQL parses ra_ctrl.ctrl_23.ctrl_config as
+    # otherwise PostgreSQL parses dotted schemas as
     # database.schema.table and raises a cross-database reference error.
     _, prefix = _format_schema_prefix(schema, d) if schema else ("", "")
     results: list = []   # list of (stmt, is_safe, reason)
@@ -3236,11 +2783,9 @@ def idempotent_deploy(
         _stage("Target connection validated")
         _stage(f"Target schema inspected: {target_schema} (sandbox)")
         _stage("Existing objects inspected: 0 tables in sandbox")
-        _stage(f"Missing objects created: {n}")
-        _stage("Configuration reconciled")
-        _stage("Source data loaded (simulated)")
-        _stage("Control transformation executed (simulated)")
-        _stage("Control results generated (simulated)")
+        _stage("HLA source data extraction completed (simulated)")
+        _stage("HLA business & transformation rules executed (simulated)")
+        _stage("Target data verified (simulated)")
         return (
             True,
             f"Sandbox deployment: {n} objects provisioned in simulated cluster.",
@@ -3256,11 +2801,7 @@ def idempotent_deploy(
     }
 
     try:
-        url = build_connection_url(target_config)
-        engine = create_engine(
-            url,
-            connect_args={"connect_timeout": 10} if "sqlite" not in url else {},
-        )
+        engine = DatabaseManager.get_engine(target_config)
 
         _stage("Target connection validated")
 
@@ -3282,7 +2823,7 @@ def idempotent_deploy(
         required_objects = _parse_required_objects_from_ddl(ddl_script)
 
         # ── 3. Reconcile ──────────────────────────────────────────────────────
-        recon = reconcile_objects(existing_meta, required_objects)
+        recon = reconcile_objects(existing_meta, required_objects, target_schema=target_schema)
         counts = recon["counts"]
 
         # ── 4. Block on INVALID objects ───────────────────────────────────────
@@ -3343,16 +2884,17 @@ def idempotent_deploy(
 
                 for stmt in raw_stmts:
                     s = stmt.strip()
-                    if not s or s.startswith("--"):
+                    s_clean = re.sub(r"--[^\n]*", "", s).strip()
+                    if not s_clean:
                         continue
-                    if not s.upper().startswith("CREATE TABLE"):
+                    if not s_clean.upper().startswith("CREATE TABLE"):
                         continue
 
                     # Identify which table this CREATE is for
                     tm = re.search(
                         r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
                         r"((?:\"[^\"]+\"|\w+)(?:\.(?:\"[^\"]+\"|\w+))?)",
-                        s, re.IGNORECASE,
+                        s_clean, re.IGNORECASE,
                     )
                     if not tm:
                         continue
@@ -3365,7 +2907,7 @@ def idempotent_deploy(
                     safe_stmt = re.sub(
                         r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?",
                         "CREATE TABLE IF NOT EXISTS ",
-                        s, count=1, flags=re.IGNORECASE,
+                        s_clean, count=1, flags=re.IGNORECASE,
                     )
                     try:
                         conn.execute(text(safe_stmt))
@@ -3483,10 +3025,7 @@ def idempotent_deploy(
             _stage(f"Objects reconciled (columns added): {n_altered}")
         if n_failed:
             _stage(f"Objects failed reconciliation: {n_failed}", "warning")
-        _stage("Configuration reconciled")
-        _stage("Source data loaded")
-        _stage("Control transformation executed")
-        _stage("Control results generated")
+        _stage("Target schema DDL deployed")
 
         summary = (
             f"Idempotent deployment complete for schema '{target_schema}'. "
@@ -3525,9 +3064,9 @@ def extract_statement_target_and_columns(stmt: str) -> dict:
     Returns:
         {
             "operation": "INSERT" | "UPDATE" | "TRUNCATE" | "OTHER",
-            "full_target": str,        # e.g. '"ra_ctrl.ctrl_23".ctrl_config'
-            "schema_name": str | None, # e.g. 'ra_ctrl.ctrl_23'
-            "table_name": str,         # e.g. 'ctrl_config' (bare lowercase)
+            "full_target": str,        # e.g. '"custom_schema.target_table"'
+            "schema_name": str | None, # e.g. 'custom_schema'
+            "table_name": str,         # e.g. 'target_table' (bare lowercase)
             "columns": list[str],      # explicitly targeted column names in lowercase
             "is_star": bool,           # True if statement relies on wildcards without column list
         }
@@ -3622,15 +3161,17 @@ def validate_statement_against_target_schema(
     target_meta: dict,
     default_schema: str,
     stmt: str,
+    ddl_target_meta: dict = None,
     strict_not_null: bool = False
 ) -> tuple[bool, str]:
     """
-    Validates a single SQL statement against target database physical metadata.
+    Validates a single SQL statement against target database physical metadata and generated target DDL objects.
 
     Args:
-        target_meta: Dictionary returned by inspect_target_schema
+        target_meta: Dictionary returned by inspect_target_schema (live physical metadata)
         default_schema: The target schema configured for deployment
         stmt: The SQL statement to validate
+        ddl_target_meta: Dictionary of target tables and columns defined by generated DDL
         strict_not_null: If True, checks that NOT NULL columns without defaults are present
 
     Returns:
@@ -3644,25 +3185,35 @@ def validate_statement_against_target_schema(
     schema = parsed["schema_name"] or default_schema
     cols_targeted = parsed["columns"]
 
-    tables_map = target_meta.get("tables", {})
-    tbl_meta = tables_map.get(tbl_bare)
+    tables_map = (target_meta or {}).get("tables", {})
+    ddl_tables_map = (ddl_target_meta or {}).get("tables", {})
 
-    # 1. Validate Table exists
+    tbl_meta = tables_map.get(tbl_bare)
+    is_from_ddl = False
+
+    # 1. Validate Table exists in physical DB or is defined in generated target DDL
     if not tbl_meta:
-        # Check if table might be in target_meta case-insensitively
         found_key = next((k for k in tables_map if k.lower() == tbl_bare), None)
         if found_key:
             tbl_meta = tables_map[found_key]
+        elif tbl_bare in ddl_tables_map:
+            tbl_meta = ddl_tables_map[tbl_bare]
+            is_from_ddl = True
         else:
-            diag = (
-                f"[SCHEMA VALIDATION FAILED]\n"
-                f"Target:\n"
-                f"    {schema}.{tbl_bare}\n"
-                f"Status:\n"
-                f"    Table does not exist in target schema '{schema}'.\n"
-                f"Deployment SQL was NOT executed."
-            )
-            return False, diag
+            found_ddl_key = next((k for k in ddl_tables_map if k.lower() == tbl_bare), None)
+            if found_ddl_key:
+                tbl_meta = ddl_tables_map[found_ddl_key]
+                is_from_ddl = True
+            else:
+                diag = (
+                    f"[SCHEMA VALIDATION FAILED]\n"
+                    f"Target:\n"
+                    f"    {schema}.{tbl_bare}\n"
+                    f"Status:\n"
+                    f"    Table does not exist in target schema '{schema}' and is not defined in target DDL.\n"
+                    f"Deployment SQL was NOT executed."
+                )
+                return False, diag
 
     actual_col_names = tbl_meta.get("column_names", set())
     actual_cols_info = {c["name"].lower(): c for c in tbl_meta.get("columns", [])}
@@ -3676,14 +3227,14 @@ def validate_statement_against_target_schema(
             f"    {schema}.{tbl_bare}\n"
             f"Generated columns:\n"
             f"    " + "\n    ".join(cols_targeted) + "\n"
-            f"Columns not present in target:\n"
+            f"Columns not present in target definition:\n"
             f"    " + "\n    ".join(missing_cols) + "\n"
             f"Deployment SQL was NOT executed."
         )
         return False, diag
 
-    # 3. Validate NOT NULL columns without default (for INSERT)
-    if parsed["operation"] == "INSERT" and not parsed["is_star"] and strict_not_null:
+    # 3. Validate NOT NULL columns without default (for INSERT on physical tables)
+    if not is_from_ddl and parsed["operation"] == "INSERT" and not parsed["is_star"] and strict_not_null:
         missing_required = []
         for col_name, c_info in actual_cols_info.items():
             if not c_info.get("is_nullable", True):
@@ -3702,7 +3253,7 @@ def validate_statement_against_target_schema(
             return False, diag
 
     # 4. Check for illegal INSERT into GENERATED ALWAYS or IDENTITY columns
-    if parsed["operation"] == "INSERT":
+    if not is_from_ddl and parsed["operation"] == "INSERT":
         illegal_gen_cols = []
         for col_name in cols_targeted:
             c_info = actual_cols_info.get(col_name, {})
@@ -3725,30 +3276,38 @@ def validate_statement_against_target_schema(
 def validate_transformation_pipeline_against_schema(
     target_config: dict,
     transform_sql: str,
+    ddl_script: str = None,
     strict_not_null: bool = False
 ) -> tuple[bool, str, list[dict]]:
     """
     Generic pre-execution validation gate for an entire transformation script.
-    Inspects physical target database schema and validates all statements before execution.
+    Inspects target database schema and generated DDL to validate all statements before execution.
+    Recognizes newly generated target tables defined by the DDL specification.
 
     Returns:
         (success: bool, message: str, diagnostics: list[dict])
     """
     db_type = (target_config.get("db_type") or "postgresql").lower()
-    target_schema = target_config.get("schema_name") or "public"
+    target_schema = (target_config.get("schema_name") or "").strip() or "public"
 
     if db_type == "sandbox":
         return True, "Sandbox mode: Schema pre-execution validation bypassed.", []
 
+    # Build DDL-defined targets metadata
+    ddl_target_meta = {"tables": {}}
+    if ddl_script:
+        req_objs = _parse_required_objects_from_ddl(ddl_script)
+        for obj in req_objs:
+            b_name = obj["bare_name"].lower()
+            cols = obj.get("columns", [])
+            ddl_target_meta["tables"][b_name] = {
+                "columns": cols,
+                "column_names": {c["name"].lower() for c in cols}
+            }
+
     try:
-        url = build_connection_url(target_config)
-        engine = create_engine(
-            url,
-            connect_args={"connect_timeout": 10} if "sqlite" not in url else {},
-        )
+        engine = DatabaseManager.get_engine(target_config)
         target_meta = inspect_target_schema(engine, target_schema)
-        if not target_meta.get("schema_exists"):
-            return False, f"[SCHEMA VALIDATION FAILED] Target schema '{target_schema}' does not exist in target database.", []
 
         statements = _split_sql_statements(transform_sql)
         diagnostics = []
@@ -3761,6 +3320,7 @@ def validate_transformation_pipeline_against_schema(
                 target_meta,
                 target_schema,
                 clean_stmt,
+                ddl_target_meta=ddl_target_meta,
                 strict_not_null=strict_not_null
             )
             if not is_valid:
@@ -3773,7 +3333,7 @@ def validate_transformation_pipeline_against_schema(
             summary = "\n\n".join(d["error"] for d in diagnostics)
             return False, summary, diagnostics
 
-        return True, "Pre-execution schema validation passed. All generated SQL statements match target physical schema.", []
+        return True, "Pre-execution schema validation passed. All generated SQL statements match target physical schema and DDL definitions.", []
 
     except Exception as exc:
         return False, f"[SCHEMA VALIDATION FAILED] Error inspecting target schema: {exc}", [{"statement": "", "error": str(exc)}]

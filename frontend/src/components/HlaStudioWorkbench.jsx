@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import api from '../services/api';
 
 export default function HlaStudioWorkbench({
@@ -18,9 +18,22 @@ export default function HlaStudioWorkbench({
   const [progressPercent, setProgressPercent] = useState(0);
   const [openStage, setOpenStage] = useState(null);
   const [docDropdownOpen, setDocDropdownOpen] = useState(false);
-  const [activeFileTab, setActiveFileTab] = useState('sources');
+  const [activeFileTab, setActiveFileTab] = useState('components');
   const [mappingFilter, setMappingFilter] = useState('all');
+  const [priorityFilter, setPriorityFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedSourceTable, setSelectedSourceTable] = useState(null);
+
+  // Close source detail modal on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setSelectedSourceTable(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const activeDoc = projectDocs.find((d) => d.id === selectedDocId) || projectDocs[0] || null;
 
@@ -55,7 +68,7 @@ export default function HlaStudioWorkbench({
       setAnalysisStep(2);
       setProgressPercent(66);
 
-      // Step 2: mapping
+      // Step 2: semantic mapping
       setTimeout(async () => {
         setAnalysisStep(3);
         setProgressPercent(100);
@@ -70,7 +83,7 @@ export default function HlaStudioWorkbench({
             }));
             if (onRefreshDocs) onRefreshDocs();
           }
-          if (showToast) showToast('Analysis complete — 100% compliant, 0 unresolved rules');
+          if (showToast) showToast('Document analysis complete — structure dynamically discovered');
         } catch (err) {
           if (showToast) showToast(err.response?.data?.error || 'Analysis failed.');
         } finally {
@@ -78,10 +91,10 @@ export default function HlaStudioWorkbench({
             setAnalysisRunning(false);
             setAnalysisStep(0);
             setProgressPercent(0);
-          }, 1200);
+          }, 1000);
         }
-      }, 750);
-    }, 750);
+      }, 600);
+    }, 600);
   };
 
   const toggleStage = (stageNum) => {
@@ -94,10 +107,10 @@ export default function HlaStudioWorkbench({
 
   const handleDeleteDoc = async (docIdToDelete, docName) => {
     if (!docIdToDelete) return;
-    const displayName = docName || 'this HLA document';
+    const displayName = docName || 'this document';
     if (
       !window.confirm(
-        `Are you sure you want to remove HLA document "${displayName}"?\n\nThis will delete the uploaded workbook, extracted source tables, filter rules, and reconciliation models.`
+        `Are you sure you want to remove document "${displayName}"?\n\nThis will remove the uploaded workbook and all extracted metadata.`
       )
     ) {
       return;
@@ -107,7 +120,7 @@ export default function HlaStudioWorkbench({
     try {
       await api.delete(`/api/documents/${docIdToDelete}`);
       if (showToast) {
-        showToast(`HLA document "${displayName}" removed successfully.`);
+        showToast(`Document "${displayName}" removed successfully.`);
       }
       if (onRefreshDocs) {
         await onRefreshDocs();
@@ -119,7 +132,7 @@ export default function HlaStudioWorkbench({
         onSelectDocId(null);
       }
     } catch (err) {
-      const msg = err.response?.data?.error || 'Failed to remove HLA document.';
+      const msg = err.response?.data?.error || 'Failed to remove document.';
       if (showToast) {
         showToast(msg);
       } else {
@@ -130,44 +143,200 @@ export default function HlaStudioWorkbench({
     }
   };
 
+  // ── Document Metadata Extraction (100% Dynamic) ──
   const analysis = doc?.analysis && typeof doc.analysis === 'object' ? doc.analysis : {};
+  const components = Array.isArray(analysis.components) ? analysis.components : [];
+  const requirements = Array.isArray(analysis.requirements) ? analysis.requirements : [];
   const sources = Array.isArray(analysis.sources)
     ? analysis.sources
     : Array.isArray(analysis.source_tables)
     ? analysis.source_tables
     : [];
-  const rules = analysis.rules && typeof analysis.rules === 'object' ? analysis.rules : {};
-  const filterRules = Array.isArray(rules.filter_rules) ? rules.filter_rules : [];
-  const balanceRules = Array.isArray(rules.balance_rules) ? rules.balance_rules : [];
+  const allTableObjects = Array.isArray(analysis.all_table_objects)
+    ? analysis.all_table_objects
+    : (Array.isArray(analysis.hla_data_model?.all_table_objects)
+      ? analysis.hla_data_model.all_table_objects
+      : (sources.length > 0 ? sources : []));
+  const dataModel = Array.isArray(analysis.data_model)
+    ? analysis.data_model
+    : (Array.isArray(analysis.target_tables) ? analysis.target_tables : []);
+  const logicalInputs = Array.isArray(analysis.logical_input_streams)
+    ? analysis.logical_input_streams
+    : (Array.isArray(analysis.logical_inputs) ? analysis.logical_inputs : []);
+  const lineageRelationships = Array.isArray(analysis.lineage_relationships)
+    ? analysis.lineage_relationships
+    : (Array.isArray(analysis.hla_data_model?.lineage_relationships) ? analysis.hla_data_model.lineage_relationships : []);
+  const rulesObj = analysis.rules && typeof analysis.rules === 'object' ? analysis.rules : {};
+  const filterRules = Array.isArray(rulesObj.filter_rules) ? rulesObj.filter_rules : [];
+  const balanceRules = Array.isArray(rulesObj.balance_rules) ? rulesObj.balance_rules : [];
+  const businessRules = Array.isArray(rulesObj.business_rules) ? rulesObj.business_rules : [];
+  const allRules = [...filterRules, ...balanceRules, ...businessRules.filter(b => !filterRules.includes(b) && !balanceRules.includes(b))];
   const mappings = Array.isArray(analysis.mappings) ? analysis.mappings : [];
-  const dataModel = Array.isArray(analysis.data_model) ? analysis.data_model : [];
-  const buckets = Array.isArray(analysis.buckets) ? analysis.buckets : [];
-  const synthesis = analysis.llm_synthesis && typeof analysis.llm_synthesis === 'object' ? analysis.llm_synthesis : {};
+  const pipelineStages = Array.isArray(analysis.pipeline_stages) ? analysis.pipeline_stages : [];
+  const buckets = Array.isArray(analysis.buckets) ? analysis.buckets : (Array.isArray(analysis.reconciliation) ? analysis.reconciliation : []);
+  const rawSheets = analysis.raw_sheets && typeof analysis.raw_sheets === 'object' ? analysis.raw_sheets : {};
+  const sheetNames = analysis.sheet_names || Object.keys(rawSheets);
+  const detectedSections = Array.isArray(analysis.detected_sections) ? analysis.detected_sections : [];
+  const summaryCounts = analysis.summary_counts || {};
 
-  const sourceCount = sources.length || 6;
-  const filterCount = filterRules.length || 10;
-  const balanceCount = balanceRules.length || 1;
-  const attrCount = mappings.length || 32;
+  const [archLayerFilter, setArchLayerFilter] = useState('all');
 
-  const truncateCount = sources.filter((s) => (s.type_of_load || s.load_type || '').toLowerCase().includes('truncate')).length || (sources.length > 1 ? sources.length - 1 : 5);
-  const appendCount = sources.filter((s) => (s.type_of_load || s.load_type || '').toLowerCase().includes('append')).length || (sources.some((s) => (s.type_of_load || '').toLowerCase().includes('append')) ? 1 : 1);
-  const directCount = mappings.filter((m) => (m.mapping_type || '').toLowerCase() === 'direct').length || 22;
-  const derivedCount = mappings.filter((m) => (m.mapping_type || '').toLowerCase() === 'derived').length || 10;
+  // Build available dynamic sub-tabs
+  const availableTabs = useMemo(() => {
+    const tabs = [];
+    if (sources.length > 0) {
+      tabs.push({ id: 'sources', label: 'Source Systems', count: sources.length });
+    }
+    if (dataModel.length > 0) {
+      tabs.push({ id: 'datamodel', label: 'Target Architecture', count: dataModel.length });
+    }
+    if (allRules.length > 0) {
+      tabs.push({ id: 'rules', label: 'Business Rules & Filters', count: allRules.length });
+    }
+    if (mappings.length > 0) {
+      tabs.push({ id: 'mappings', label: 'Attribute Mapping (Lineage)', count: mappings.length });
+    }
+    if (buckets.length > 0) {
+      tabs.push({ id: 'buckets', label: 'Buckets & KRI', count: buckets.length });
+    }
+    if (components.length > 0) {
+      tabs.push({ id: 'components', label: 'Architecture Components', count: components.length });
+    }
+    if (requirements.length > 0) {
+      tabs.push({ id: 'requirements', label: 'Requirements', count: requirements.length });
+    }
+    tabs.push({ id: 'raw_sheets', label: 'Discovered Sheets', count: sheetNames.length });
+    tabs.push({ id: 'synthesis', label: 'Architecture Synthesis & Code' });
+    return tabs;
+  }, [sources.length, dataModel.length, allRules.length, mappings.length, buckets.length, components.length, requirements.length, sheetNames.length]);
 
-  const filteredMappings = mappings.filter((m) => {
-    if (mappingFilter === 'direct' && m.mapping_type !== 'Direct') return false;
-    if (mappingFilter === 'derived' && m.mapping_type !== 'Derived') return false;
+  // Adjust active tab if current tab is not available
+  useEffect(() => {
+    if (availableTabs.length > 0) {
+      const exists = availableTabs.some((t) => t.id === activeFileTab);
+      if (!exists) {
+        setActiveFileTab(availableTabs[0].id);
+      }
+    }
+  }, [availableTabs, activeFileTab]);
+
+  // Filter components
+  const filteredComponents = useMemo(() => {
+    if (!searchQuery.trim()) return components;
+    const q = searchQuery.toLowerCase();
+    return components.filter(
+      (c) =>
+        c.component?.toLowerCase().includes(q) ||
+        c.responsibility?.toLowerCase().includes(q) ||
+        c.input?.toLowerCase().includes(q) ||
+        c.output?.toLowerCase().includes(q) ||
+        c.technology?.toLowerCase().includes(q) ||
+        c.interaction?.toLowerCase().includes(q)
+    );
+  }, [components, searchQuery]);
+
+  // Filter requirements
+  const filteredRequirements = useMemo(() => {
+    let list = requirements;
+    if (priorityFilter !== 'all') {
+      list = list.filter((r) => (r.priority || '').toLowerCase() === priorityFilter.toLowerCase());
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
-      return (
-        m.target_column?.toLowerCase().includes(q) ||
-        m.source_field?.toLowerCase().includes(q) ||
-        m.source_table?.toLowerCase().includes(q) ||
-        m.derivation_logic?.toLowerCase().includes(q)
+      list = list.filter(
+        (r) =>
+          r.requirement?.toLowerCase().includes(q) ||
+          r.description?.toLowerCase().includes(q) ||
+          r.acceptance_criteria?.toLowerCase().includes(q)
       );
     }
-    return true;
-  });
+    return list;
+  }, [requirements, priorityFilter, searchQuery]);
+
+  // Filter mappings
+  const filteredMappings = useMemo(() => {
+    let list = mappings;
+    if (mappingFilter === 'direct') {
+      list = list.filter((m) => (m.mapping_type || '').toLowerCase() === 'direct');
+    } else if (mappingFilter === 'derived') {
+      list = list.filter((m) => (m.mapping_type || '').toLowerCase() === 'derived');
+    }
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(
+        (m) =>
+          m.target_column?.toLowerCase().includes(q) ||
+          m.source_field?.toLowerCase().includes(q) ||
+          m.source_table?.toLowerCase().includes(q) ||
+          m.derivation_logic?.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [mappings, mappingFilter, searchQuery]);
+
+  // Filter sources dynamically
+  const filteredSources = useMemo(() => {
+    if (!searchQuery.trim()) return sources;
+    const q = searchQuery.toLowerCase();
+    return sources.filter((s) => {
+      const tName = (s.full_table_name || s.source_table_name || s.table_name || '').toLowerCase();
+      const schema = (s.schema || s.source_schema || '').toLowerCase();
+      const db = (s.database || s.database_name || s.source_system || s.source_db || '').toLowerCase();
+      const loadType = (s.load_type || s.type_of_load || '').toLowerCase();
+      const freq = (s.frequency || '').toLowerCase();
+      const sched = (s.schedule_time || s.schedule || '').toLowerCase();
+      return (
+        tName.includes(q) ||
+        schema.includes(q) ||
+        db.includes(q) ||
+        loadType.includes(q) ||
+        freq.includes(q) ||
+        sched.includes(q)
+      );
+    });
+  }, [sources, searchQuery]);
+
+  // Related metadata for currently selected source table
+  const relatedSourceMappings = useMemo(() => {
+    if (!selectedSourceTable) return [];
+    const tName = (selectedSourceTable.source_table_name || selectedSourceTable.table_name || '').toLowerCase();
+    const fullTName = (selectedSourceTable.full_table_name || '').toLowerCase();
+    const schema = (selectedSourceTable.schema || '').toLowerCase();
+    return mappings.filter((m) => {
+      const mTable = (m.source_table || '').toLowerCase();
+      const mField = (m.source_field || '').toLowerCase();
+      if (!mTable && !mField) return false;
+      return (
+        (tName && (mTable === tName || mTable.includes(tName))) ||
+        (fullTName && (mTable === fullTName || mTable.includes(fullTName))) ||
+        (schema && (mTable.startsWith(`${schema}.`) || mField.startsWith(`${schema}.`)))
+      );
+    });
+  }, [selectedSourceTable, mappings]);
+
+  const relatedSourceRules = useMemo(() => {
+    if (!selectedSourceTable) return [];
+    const tName = (selectedSourceTable.source_table_name || selectedSourceTable.table_name || '').toLowerCase();
+    const fullTName = (selectedSourceTable.full_table_name || '').toLowerCase();
+    const schema = (selectedSourceTable.schema || '').toLowerCase();
+    return allRules.filter((r) => {
+      const stream = (r.data_stream || r.target || r.source_table || '').toLowerCase();
+      const stmt = (r.rule_statement || r.description || r.rule_description || '').toLowerCase();
+      return (
+        (tName && (stream.includes(tName) || stmt.includes(tName))) ||
+        (fullTName && (stream.includes(fullTName) || stmt.includes(fullTName))) ||
+        (schema && (stream.includes(schema) || stmt.includes(schema)))
+      );
+    });
+  }, [selectedSourceTable, allRules]);
+
+  const relatedTargetAttributes = useMemo(() => {
+    const list = new Set();
+    relatedSourceMappings.forEach((m) => {
+      if (m.target_column) list.add(m.target_column);
+    });
+    return Array.from(list);
+  }, [relatedSourceMappings]);
 
   if (!activeDoc) {
     return (
@@ -175,8 +344,8 @@ export default function HlaStudioWorkbench({
         <div className="icon">⇪</div>
         <h3>No documents in this workspace</h3>
         <p>
-          Drop an HLA specification Excel workbook (.xlsx, .xls) here. HLA Studio will parse
-          it and extract source tables, rules, and lineage automatically.
+          Drop an architecture or specification Excel workbook (.xlsx, .xls) here.
+          HLA Studio will parse it and extract components, requirements, tables, and lineage dynamically.
         </p>
         <button
           className="btn-buy"
@@ -200,7 +369,18 @@ export default function HlaStudioWorkbench({
               <button
                 className="doc-switch"
                 onClick={() => setDocDropdownOpen(!docDropdownOpen)}
-                style={{ fontSize: '15px', fontWeight: 700, color: 'var(--link)', display: 'inline-flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                style={{
+                  fontSize: '15px',
+                  fontWeight: 700,
+                  color: 'var(--link)',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  background: 'none',
+                  border: 'none',
+                  cursor: 'pointer',
+                  padding: 0,
+                }}
               >
                 {activeDoc.original_name || activeDoc.filename} ▾
               </button>
@@ -221,14 +401,14 @@ export default function HlaStudioWorkbench({
                       </span>
                       {canDelete && (
                         <span
-                          title="Remove this HLA document"
+                          title="Remove this document"
                           style={{
                             color: '#ef4444',
                             padding: '2px 6px',
                             borderRadius: '4px',
                             fontSize: '12px',
                             cursor: 'pointer',
-                            flexShrink: 0
+                            flexShrink: 0,
                           }}
                           onClick={(e) => {
                             e.stopPropagation();
@@ -246,12 +426,15 @@ export default function HlaStudioWorkbench({
             </div>
             <div className="doc-meta">
               <span className="status-chip">✓ {doc?.status === 'analyzed' ? 'Analyzed' : 'Ready'}</span>
-              <span>{((activeDoc.file_size || 22200) / 1024).toFixed(1)} KB</span>
+              <span>{((activeDoc.file_size || 0) / 1024).toFixed(1)} KB</span>
               <span>·</span>
               <span>Doc #{activeDoc.id}</span>
               <span>·</span>
-              <span>Uploaded {activeDoc.uploaded_at ? new Date(activeDoc.uploaded_at).toLocaleDateString() : '9/12/2026'}</span>
-              <span className="compliance">★ 100% compliant</span>
+              <span>Uploaded {activeDoc.uploaded_at ? new Date(activeDoc.uploaded_at).toLocaleDateString() : 'Today'}</span>
+              <span>·</span>
+              <span className="compliance">
+                ★ {sheetNames.length} {sheetNames.length === 1 ? 'Sheet' : 'Sheets'} Discovered
+              </span>
             </div>
           </div>
         </div>
@@ -262,7 +445,15 @@ export default function HlaStudioWorkbench({
               e.preventDefault();
               onNavigateTab('ingest');
             }}
-            style={{ fontSize: '12px', fontWeight: 600, color: 'var(--link)', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', marginRight: '6px' }}
+            style={{
+              fontSize: '12px',
+              fontWeight: 600,
+              color: 'var(--link)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              marginRight: '6px',
+            }}
           >
             + Upload another document
           </a>
@@ -280,20 +471,19 @@ export default function HlaStudioWorkbench({
               'Run AI Architecture Analysis'
             )}
           </button>
-          <button
-            className="btn-cart"
-            onClick={() => onNavigateTab('connectors')}
-          >
-            Source DBs ({sources.length || 3})
-          </button>
+          {sources.length > 0 && (
+            <button className="btn-cart" onClick={() => onNavigateTab('connectors')}>
+              Source DBs ({sources.length})
+            </button>
+          )}
           {canDelete && (
             <button
               className="btn-danger-ghost"
               onClick={() => handleDeleteDoc(activeDoc.id, activeDoc.original_name || activeDoc.filename)}
               disabled={deletingDocId === activeDoc.id}
-              title="Remove this uploaded HLA document"
+              title="Remove this uploaded document"
             >
-              {deletingDocId === activeDoc.id ? 'Removing…' : '🗑️ Remove HLA'}
+              {deletingDocId === activeDoc.id ? 'Removing…' : '🗑️ Remove Document'}
             </button>
           )}
         </div>
@@ -303,279 +493,498 @@ export default function HlaStudioWorkbench({
       <div className={`analysis-progress ${analysisRunning ? 'show' : ''}`} id="analysisProgress">
         <div className={`step ${analysisStep > 1 ? 'done' : analysisStep === 1 ? 'current' : ''}`}>
           <span className="mark">{analysisStep > 1 ? '✓' : analysisStep === 1 ? '◐' : '○'}</span>
-          Parsing workbook structure…
+          Discovering workbook sheets &amp; table boundaries…
         </div>
         <div className={`step ${analysisStep > 2 ? 'done' : analysisStep === 2 ? 'current' : ''}`}>
           <span className="mark">{analysisStep > 2 ? '✓' : analysisStep === 2 ? '◐' : '○'}</span>
-          Mapping source tables to lineage graph…
+          Inferring semantic entities, architecture components &amp; requirements…
         </div>
         <div className={`step ${analysisStep === 3 ? 'current done' : ''}`}>
           <span className="mark">{analysisStep === 3 ? '✓' : '○'}</span>
-          Validating rules R1–R11 against schema…
+          Building isolated document knowledge model…
         </div>
         <div className="progress-track">
           <div className="progress-fill" style={{ width: `${progressPercent}%` }}></div>
         </div>
       </div>
 
-      {/* ── Stat Product Cards ── */}
+      {/* ── Dynamic Stat Metric Cards ── */}
       <div className="stats">
-        <div className="stat" title="Source systems feeding into data lake">
-          <div className="stat-label">Source Datasets</div>
-          <div className="stat-value">{sourceCount}</div>
-          <div className="stat-sub">{truncateCount} truncate · {appendCount} append</div>
-        </div>
-        <div className="stat" title="Pre-execution quality gates">
-          <div className="stat-label">Filter Rules (R1–R10)</div>
-          <div className="stat-value">{filterCount}</div>
-          <div className="stat-sub">Pre-execution validation</div>
-        </div>
-        <div className="stat" title="Reconciliation balance gate">
-          <div className="stat-label">Balance Rules (R11+)</div>
-          <div className="stat-value">{balanceCount}</div>
-          <div className="stat-sub">Reconciliation node & buckets</div>
-        </div>
-        <div className="stat" title="Fields written to target schema">
-          <div className="stat-label">Target Attributes</div>
-          <div className="stat-value">{attrCount}</div>
-          <div className="stat-sub">{directCount} direct · {derivedCount} derived</div>
+        {components.length > 0 && (
+          <div className="stat" title="Architecture components detected in workbook">
+            <div className="stat-label">Architecture Components</div>
+            <div className="stat-value">{components.length}</div>
+            <div className="stat-sub">
+              {components.map((c) => c.component).slice(0, 2).join(', ')}
+              {components.length > 2 ? ` +${components.length - 2} more` : ''}
+            </div>
+          </div>
+        )}
+
+        {requirements.length > 0 && (
+          <div className="stat" title="Requirements parsed from specification">
+            <div className="stat-label">Requirements</div>
+            <div className="stat-value">{requirements.length}</div>
+            <div className="stat-sub">
+              {requirements.filter((r) => (r.priority || '').toLowerCase() === 'high').length} high priority ·{' '}
+              {requirements.filter((r) => (r.priority || '').toLowerCase() === 'medium').length} medium
+            </div>
+          </div>
+        )}
+
+        {sources.length > 0 && (
+          <div className="stat" title="Physical upstream sources defined in Source Systems sheet">
+            <div className="stat-label">Physical Sources</div>
+            <div className="stat-value">{sources.length}</div>
+            <div className="stat-sub">
+              {sources.filter((s) => (s.type_of_load || '').toLowerCase().includes('truncate')).length} truncate ·{' '}
+              {sources.filter((s) => (s.type_of_load || '').toLowerCase().includes('append')).length} append
+            </div>
+          </div>
+        )}
+
+        {dataModel.length > 0 && (
+          <div className="stat" title="Target architecture entities defined in Data Model sheet">
+            <div className="stat-label">Target Architecture</div>
+            <div className="stat-value">{dataModel.length}</div>
+            <div className="stat-sub">Data Model table entities</div>
+          </div>
+        )}
+
+        {allRules.length > 0 && (
+          <div className="stat" title="Validation & Business Rules">
+            <div className="stat-label">Business & Filter Rules</div>
+            <div className="stat-value">{allRules.length}</div>
+            <div className="stat-sub">
+              {filterRules.length} filter · {balanceRules.length} balance
+            </div>
+          </div>
+        )}
+
+        {mappings.length > 0 && (
+          <div className="stat" title="Target attributes & mappings">
+            <div className="stat-label">Target Attributes</div>
+            <div className="stat-value">{mappings.length}</div>
+            <div className="stat-sub">
+              {mappings.filter((m) => m.mapping_type === 'Direct').length} direct ·{' '}
+              {mappings.filter((m) => m.mapping_type === 'Derived').length} derived
+            </div>
+          </div>
+        )}
+
+        {/* Total Sheets Card */}
+        <div className="stat" title="Total sheets scanned in workbook">
+          <div className="stat-label">Workbook Sheets</div>
+          <div className="stat-value">{sheetNames.length || 1}</div>
+          <div className="stat-sub">
+            {summaryCounts.total_rows_scanned || 0} rows scanned · {detectedSections.length} detected sections
+          </div>
         </div>
       </div>
 
-      {/* ── Pipeline Header ── */}
-      <div className="pipeline-head">
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <span className="lineage-tag">Architecture lineage</span>
-          <h2>End-to-end ETL reconciliation flow</h2>
-        </div>
-        <div className="pipeline-head-right">Click a stage to inspect details</div>
+      {/* ── Architecture Component Interaction (Only if actual Architecture Components exist in document) ── */}
+      {components.length > 0 && (
+        <>
+          <div className="pipeline-head">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className="lineage-tag">Document lineage</span>
+              <h2>Component Interaction & Data Flow</h2>
+            </div>
+            <div className="pipeline-head-right">Click a component to inspect responsibilities &amp; I/O</div>
+          </div>
+
+          <div className="schematic">
+            {components.map((c, idx) => {
+              const stageNum = idx + 1;
+              const isOpen = openStage === stageNum;
+              return (
+                <div
+                  key={idx}
+                  className={`stage ${isOpen ? 'open' : ''}`}
+                  onClick={() => toggleStage(stageNum)}
+                >
+                  <div className="stage-num">{stageNum}</div>
+                  <div className="stage-title">{c.component}</div>
+                  <div className="stage-desc">{c.responsibility || c.technology || 'Core component'}</div>
+                  <span className="stage-link">{isOpen ? 'Close details ▴' : 'Inspect I/O ▾'}</span>
+                </div>
+              );
+            })}
+
+            {/* Dynamic Interactive Drawer */}
+            {openStage && openStage <= components.length && (
+              <div className="schematic-drawer">
+                {(() => {
+                  const c = components[openStage - 1];
+                  return (
+                    <div>
+                      <strong>Component {openStage} — {c.component}:</strong>
+                      <div style={{ marginTop: '8px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
+                        <div style={{ padding: '8px 12px', background: 'rgba(59, 130, 246, 0.08)', borderRadius: '6px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+                          <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--link)', fontWeight: 700 }}>Responsibility</span>
+                          <div style={{ marginTop: '4px', fontSize: '13px', fontWeight: 600 }}>{c.responsibility || 'Not specified'}</div>
+                        </div>
+                        <div style={{ padding: '8px 12px', background: 'rgba(16, 185, 129, 0.08)', borderRadius: '6px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                          <span style={{ fontSize: '11px', textTransform: 'uppercase', color: '#10b981', fontWeight: 700 }}>Consumes (Input)</span>
+                          <div style={{ marginTop: '4px', fontSize: '13px', fontFamily: 'var(--font-mono)' }}>{c.input || 'None / Ingestion Start'}</div>
+                        </div>
+                        <div style={{ padding: '8px 12px', background: 'rgba(245, 158, 11, 0.08)', borderRadius: '6px', border: '1px solid rgba(245, 158, 11, 0.2)' }}>
+                          <span style={{ fontSize: '11px', textTransform: 'uppercase', color: '#f59e0b', fontWeight: 700 }}>Produces (Output)</span>
+                          <div style={{ marginTop: '4px', fontSize: '13px', fontFamily: 'var(--font-mono)' }}>{c.output || 'Terminal / Analytics Dataset'}</div>
+                        </div>
+                        <div style={{ padding: '8px 12px', background: 'rgba(139, 92, 246, 0.08)', borderRadius: '6px', border: '1px solid rgba(139, 92, 246, 0.2)' }}>
+                          <span style={{ fontSize: '11px', textTransform: 'uppercase', color: '#8b5cf6', fontWeight: 700 }}>Technology / Interaction</span>
+                          <div style={{ marginTop: '4px', fontSize: '13px' }}>
+                            <code>{c.technology || 'Generic Platform'}</code> · {c.interaction || 'Direct'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ── Dynamic File Sub-Tabs ── */}
+      <div className="file-tabs">
+        {availableTabs.map((tab) => (
+          <button
+            key={tab.id}
+            className={`file-tab ${activeFileTab === tab.id ? 'active' : ''}`}
+            onClick={() => {
+              setActiveFileTab(tab.id);
+              setSearchQuery('');
+            }}
+          >
+            {tab.label} {tab.count !== undefined && <span className="n">({tab.count})</span>}
+          </button>
+        ))}
       </div>
 
-      {/* ── Pipeline Schematic (5 Stages) ── */}
-      <div className="schematic">
-        {/* Stage 1 */}
-        <div className={`stage ${openStage === 1 ? 'open' : ''}`} onClick={() => toggleStage(1)}>
-          <div className="stage-num">1</div>
-          <div className="stage-title">Upstream feeds</div>
-          <div className="stage-desc">{sources.length || 6} feeds · Strict arrival &amp; append gate</div>
-          <span className="stage-link">{openStage === 1 ? 'Close inventory ▴' : 'Inspect inventory ▾'}</span>
-
-        </div>
-
-        {/* Stage 2 */}
-        <div className={`stage ${openStage === 2 ? 'open' : ''}`} onClick={() => toggleStage(2)}>
-          <div className="stage-num">2</div>
-          <div className="stage-title">R1–R10 filters</div>
-          <div className="stage-desc">10 quality & dedup rules at pre-execution.</div>
-          <span className="stage-link">{openStage === 2 ? 'Close logic ▴' : 'View logic ▾'}</span>
-        </div>
-
-        {/* Stage 3 */}
-        <div className={`stage ${openStage === 3 ? 'open' : ''}`} onClick={() => toggleStage(3)}>
-          <div className="stage-num">3</div>
-          <div className="stage-title">R11 balance gate</div>
-          <div className="stage-desc">Consolidated clean dataset staging.</div>
-          <span className="stage-link">{openStage === 3 ? 'Close gatekeeper ▴' : 'Gatekeeper ▾'}</span>
-        </div>
-
-        {/* Stage 4 */}
-        <div className={`stage ${openStage === 4 ? 'open' : ''}`} onClick={() => toggleStage(4)}>
-          <div className="stage-num">4</div>
-          <div className="stage-title">Recon matching</div>
-          <div className="stage-desc">IP exact → host name → fuzzy match.</div>
-          <span className="stage-link">{openStage === 4 ? 'Close mappings ▴' : 'View mappings ▾'}</span>
-        </div>
-
-        {/* Stage 5 */}
-        <div className={`stage ${openStage === 5 ? 'open' : ''}`} onClick={() => toggleStage(5)}>
-          <div className="stage-num">5</div>
-          <div className="stage-title">Output buckets</div>
-          <div className="stage-desc">Reconciled vs exceptions & KRI alerts.</div>
-          <span className="stage-link">{openStage === 5 ? 'Close audit ▴' : 'Audit ready ▾'}</span>
-        </div>
-
-        {/* Shared Full-Width Drawer across all 5 stages */}
-        {openStage && (
-          <div className="schematic-drawer">
-            {openStage === 1 && (
-              <div>
-                <strong>Stage 1 — Upstream Source Feeds Inventory:</strong>
-                <div style={{ marginTop: '6px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '6px' }}>
-                  {sources.length > 0 ? (
-                    sources.map((s, i) => (
-                      <code key={i}>{s.full_table_name || s.table_name} ({s.type_of_load || 'Truncate'})</code>
+      {/* ── Sub-Tab Content Displays (Data-Driven, No Hardcoding) ── */}
+      <div style={{ marginTop: '16px' }}>
+        {/* Tab: Architecture Components */}
+        {activeFileTab === 'components' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <span style={{ fontSize: '13px', color: 'var(--text-mute)' }}>
+                Showing {filteredComponents.length} architecture components discovered in workbook.
+              </span>
+              <input
+                type="text"
+                placeholder="Search components, inputs, outputs…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-card)',
+                  color: 'var(--text)',
+                  fontSize: '12.5px',
+                  width: '260px',
+                }}
+              />
+            </div>
+            <div className="table-responsive-wrapper">
+              <table className="enterprise-data-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Component Name</th>
+                    <th>Responsibility</th>
+                    <th>Consumes (Input)</th>
+                    <th>Produces (Output)</th>
+                    <th>Technology</th>
+                    <th>Interaction</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredComponents.length > 0 ? (
+                    filteredComponents.map((c, idx) => (
+                      <tr key={idx}>
+                        <td>{idx + 1}</td>
+                        <td style={{ fontWeight: 700, color: 'var(--link)' }}>{c.component}</td>
+                        <td style={{ fontSize: '13px', color: 'var(--text)' }}>{c.responsibility || '-'}</td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px' }}>
+                          <span className="badge" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', borderColor: 'rgba(16, 185, 129, 0.3)' }}>
+                            {c.input || '-'}
+                          </span>
+                        </td>
+                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12.5px' }}>
+                          <span className="badge" style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--link)', borderColor: 'rgba(59, 130, 246, 0.3)' }}>
+                            {c.output || '-'}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="badge" style={{ background: '#F1F5F9', color: '#334155' }}>
+                            {c.technology || '-'}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: '12.5px' }}>{c.interaction || '-'}</td>
+                      </tr>
                     ))
                   ) : (
-                    <>
-                      <code>cmdb.dl_itsm_cmdb_daily_dump (Truncate)</code>
-                      <code>reports.dl_vdom_firewall_audit_report (Append)</code>
-                      <code>pearl.dl_pearl_active_profiles (Truncate)</code>
-                      <code>qlik_report.dl_ra_order_report_daily (Truncate)</code>
-                      <code>sfdc.copf_id (Truncate)</code>
-                      <code>ra.stg_rk_ckt_recon_final (Truncate)</code>
-                    </>
-                  )}
-                </div>
-
-                <div style={{ marginTop: '8px', padding: '6px 10px', background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: '4px', fontSize: '11.5px', color: '#f59e0b' }}>
-                  🔒 <strong>Mandatory SLA Arrival Gate:</strong> All {sources.length || 6} feeds must arrive by scheduled date/time. If even one feed is missing or if an Append table (e.g. <code>reports.dl_vdom_firewall_audit_report</code>) has no latest date data for the run, the control strictly halts.
-                </div>
-              </div>
-            )}
-
-            {openStage === 2 && (
-              <div>
-                <strong>Stage 2 — R1–R10 Pre-Execution Filters:</strong>
-                <div style={{ marginTop: '6px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '6px' }}>
-                  <span>R1–R8: Dedup &amp; null-key checks per source</span>
-                  <span>R9: Strip internal firewall profiles (VDOM)</span>
-                  <span>R10: Filter test &amp; dummy IPs (CMDB)</span>
-                </div>
-              </div>
-            )}
-            {openStage === 3 && (
-              <div>
-                <strong>Stage 3 — R11 Balance Gatekeeper:</strong>
-                <div style={{ marginTop: '6px' }}>
-                  <code>Output Table: BALANCE_DATASET_*</code> · Only balanced, clean records proceed to matching engine.
-                </div>
-              </div>
-            )}
-            {openStage === 4 && (
-              <div>
-                <strong>Stage 4 — Reconciliation Matching Engine:</strong>
-                <div style={{ marginTop: '6px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '6px' }}>
-                  <span>R12: VDOM ↔ CMDB (IP address, host name, fuzzy match)</span>
-                  <span>R13: DDOS ↔ CMDB (profile name normalization)</span>
-                  <span>R15: Master Reconciliation ↔ Circuit Reco</span>
-                </div>
-              </div>
-            )}
-            {openStage === 5 && (
-              <div>
-                <strong>Stage 5 — Audit Output Buckets &amp; KRI Routing:</strong>
-                <div style={{ marginTop: '6px', display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '6px' }}>
-                  <span>YY: Matched clean records → Master warehouse</span>
-                  <span>YN / NY: Reconciliation exceptions → KRI 01–04 alerts</span>
-                  <span>Non-KRI: Informational delta tracking</span>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* ── File Sub-Tabs ── */}
-      <div className="file-tabs">
-        <button
-          className={`file-tab ${activeFileTab === 'sources' ? 'active' : ''}`}
-          onClick={() => setActiveFileTab('sources')}
-        >
-          Source systems & tables <span className="n">({sources.length || 6})</span>
-        </button>
-        <button
-          className={`file-tab ${activeFileTab === 'rules' ? 'active' : ''}`}
-          onClick={() => setActiveFileTab('rules')}
-        >
-          Filter & balance rules <span className="n">({filterRules.length + balanceRules.length || 11})</span>
-        </button>
-        <button
-          className={`file-tab ${activeFileTab === 'mappings' ? 'active' : ''}`}
-          onClick={() => setActiveFileTab('mappings')}
-        >
-          Attribute mapping matrix <span className="n">({mappings.length || 32})</span>
-        </button>
-        <button
-          className={`file-tab ${activeFileTab === 'datamodel' ? 'active' : ''}`}
-          onClick={() => setActiveFileTab('datamodel')}
-        >
-          Data model <span className="n">({dataModel.length || 25})</span>
-        </button>
-        <button
-          className={`file-tab ${activeFileTab === 'buckets' ? 'active' : ''}`}
-          onClick={() => setActiveFileTab('buckets')}
-        >
-          Buckets & KRI <span className="n">({buckets.length || 20})</span>
-        </button>
-        <button
-          className={`file-tab ${activeFileTab === 'synthesis' ? 'active' : ''}`}
-          onClick={() => setActiveFileTab('synthesis')}
-        >
-          Architecture synthesis & code
-        </button>
-      </div>
-
-      {/* ── File Tab Content Displays ── */}
-      <div style={{ marginTop: '16px' }}>
-        {/* Tab 1: Sources */}
-        {activeFileTab === 'sources' && (
-          <div className="table-responsive-wrapper">
-            <table className="enterprise-data-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Source Table (with Schema)</th>
-                  <th>Database / Source</th>
-                  <th>Type of Load</th>
-                  <th>Frequency</th>
-                  <th>Schedule Time</th>
-                  <th>Duration</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(sources.length > 0 ? sources : [
-                  { full_table_name: 'cmdb.dl_itsm_cmdb_daily_dump', database_name: '24b', type_of_load: 'Truncate and load', frequency: 'Daily', schedule_time: 'Daily 6 AM IST', approximate_end_time: '15 min' },
-                  { full_table_name: 'pearl.dl_pearl_active_profiles', database_name: '24b', type_of_load: 'Truncate and load', frequency: 'Daily', schedule_time: 'Daily 9 PM IST', approximate_end_time: '15 min' },
-                  { full_table_name: 'sfdc.copf_id', database_name: '24a', type_of_load: 'Truncate and load', frequency: 'Daily', schedule_time: 'Daily 7:30 AM IST', approximate_end_time: '30 min' },
-                  { full_table_name: 'qlik_report.dl_ra_order_report_daily', database_name: '24b', type_of_load: 'Truncate and load', frequency: 'Daily', schedule_time: 'Daily 11 AM IST', approximate_end_time: '15 min' },
-                  { full_table_name: 'ra.stg_rk_ckt_recon_final', database_name: 'RA Recon db', type_of_load: 'Truncate and load', frequency: 'Daily', schedule_time: 'Daily 1 PM IST', approximate_end_time: '15 min' },
-                  { full_table_name: 'reports.dl_vdom_firewall_audit_report', database_name: '24b', type_of_load: 'Append. (Take the latest week data for reconciliation)', frequency: 'Weekly', schedule_time: 'Every Monday 9AM IST', approximate_end_time: '15 min' },
-                ]).map((s, idx) => {
-                  const isAppend = (s.type_of_load || s.load_type || '').toLowerCase().includes('append');
-                  return (
-                    <tr key={idx}>
-                      <td>{idx + 1}</td>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--link)' }}>
-                        {s.full_table_name || s.table_name || s.source_table || `Source_${idx + 1}`}
-                      </td>
-                      <td>
-                        <span style={{ fontWeight: 600, color: 'var(--text)' }}>
-                          {s.database_name || s.source_db || s.source_system || s.source_name || '24b'}
-                        </span>
-                      </td>
-                      <td>
-                        <span
-                          className="badge"
-                          style={{
-                            background: isAppend ? 'rgba(245, 158, 11, 0.12)' : '#E8F0FE',
-                            color: isAppend ? '#f59e0b' : 'var(--accent-dark)',
-                            borderColor: isAppend ? 'rgba(245, 158, 11, 0.35)' : '#C7D9FB',
-                            fontWeight: 700
-                          }}
-                        >
-                          {s.type_of_load || s.load_type || 'Truncate and load'}
-                        </span>
-                      </td>
-                      <td>
-                        <span style={{ fontWeight: s.frequency === 'Weekly' ? 700 : 500 }}>
-                          {s.frequency || s.refresh_time || 'Daily'}
-                        </span>
-                      </td>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
-                        {s.schedule_time || '-'}
-                      </td>
-                      <td style={{ fontSize: '12px', color: 'var(--text-mute)' }}>
-                        {s.approximate_end_time || '-'}
+                    <tr>
+                      <td colSpan={7} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                        No components matched your search query.
                       </td>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
-        {/* Tab 2: Filter & Balance Rules */}
+        {/* Tab: Requirements */}
+        {activeFileTab === 'requirements' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '13px', color: 'var(--text-mute)' }}>
+                  Showing {filteredRequirements.length} requirements.
+                </span>
+                <div className="btn-group" style={{ display: 'inline-flex', gap: '4px' }}>
+                  {['all', 'High', 'Medium', 'Low'].map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setPriorityFilter(p)}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: '11.5px',
+                        borderRadius: '4px',
+                        border: '1px solid var(--border)',
+                        background: priorityFilter.toLowerCase() === p.toLowerCase() ? 'var(--navy)' : 'var(--bg-card)',
+                        color: priorityFilter.toLowerCase() === p.toLowerCase() ? '#fff' : 'var(--text)',
+                        cursor: 'pointer',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {p === 'all' ? 'All Priorities' : p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <input
+                type="text"
+                placeholder="Search requirements, criteria…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-card)',
+                  color: 'var(--text)',
+                  fontSize: '12.5px',
+                  width: '260px',
+                }}
+              />
+            </div>
+            <div className="table-responsive-wrapper">
+              <table className="enterprise-data-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Requirement ID</th>
+                    <th>Description</th>
+                    <th>Priority</th>
+                    <th>Acceptance Criteria</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRequirements.length > 0 ? (
+                    filteredRequirements.map((r, idx) => {
+                      const isHigh = (r.priority || '').toLowerCase() === 'high';
+                      const isMed = (r.priority || '').toLowerCase() === 'medium';
+                      return (
+                        <tr key={idx}>
+                          <td>{idx + 1}</td>
+                          <td>
+                            <span className="badge" style={{ background: 'var(--navy)', color: '#fff', borderColor: 'var(--navy)', fontWeight: 700 }}>
+                              {r.requirement}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '13px', color: 'var(--text)', fontWeight: 500 }}>
+                            {r.description}
+                          </td>
+                          <td>
+                            <span
+                              className="badge"
+                              style={{
+                                background: isHigh ? 'rgba(239, 68, 68, 0.12)' : isMed ? 'rgba(245, 158, 11, 0.12)' : 'rgba(16, 185, 129, 0.12)',
+                                color: isHigh ? '#ef4444' : isMed ? '#f59e0b' : '#10b981',
+                                borderColor: isHigh ? 'rgba(239, 68, 68, 0.3)' : isMed ? 'rgba(245, 158, 11, 0.3)' : 'rgba(16, 185, 129, 0.3)',
+                                fontWeight: 700,
+                              }}
+                            >
+                              {r.priority || 'Medium'}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '12.5px', color: 'var(--text-mute)' }}>
+                            {r.acceptance_criteria || '-'}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={5} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                        No requirements matched your filter.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Tab: Source Systems (Physical Sources Only) */}
+        {activeFileTab === 'sources' && (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: 'var(--text)' }}>
+                  SOURCE SYSTEMS ({sources.length} Physical Upstream Source{sources.length === 1 ? '' : 's'})
+                </h3>
+                <p style={{ margin: '2px 0 0', fontSize: '12px', color: 'var(--text-mute)' }}>
+                  Physical upstream database tables defined strictly in the Source Systems section of the workbook.
+                </p>
+              </div>
+
+              <input
+                type="text"
+                placeholder="Search source system, database, schema, table…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-card)',
+                  color: 'var(--text)',
+                  fontSize: '12.5px',
+                  width: '280px',
+                }}
+              />
+            </div>
+
+            <div className="table-responsive-wrapper">
+              <table className="enterprise-data-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Source System</th>
+                    <th>Database</th>
+                    <th>Schema</th>
+                    <th>Source Table</th>
+                    <th>Load Type</th>
+                    <th>Frequency</th>
+                    <th>Schedule</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    let displayList = sources;
+                    if (searchQuery.trim()) {
+                      const q = searchQuery.toLowerCase();
+                      displayList = displayList.filter(s =>
+                        (s.source_system || '').toLowerCase().includes(q) ||
+                        (s.database || s.source_db || '').toLowerCase().includes(q) ||
+                        (s.schema || s.source_schema || '').toLowerCase().includes(q) ||
+                        (s.table || s.source_table || '').toLowerCase().includes(q) ||
+                        (s.type_of_load || s.load_type || '').toLowerCase().includes(q) ||
+                        (s.frequency || '').toLowerCase().includes(q) ||
+                        (s.schedule_time || s.schedule || '').toLowerCase().includes(q)
+                      );
+                    }
+
+                    if (displayList.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={10} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                            No physical source records found in the uploaded workbook.
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return displayList.map((s, idx) => {
+                      const srcSystem = s.source_system || s.source_name || s.database || 'Not specified';
+                      const srcDb = s.database || s.source_db || s.source_database || 'Not specified';
+                      const srcSchema = s.schema || s.source_schema || s.schema_name || 'public';
+                      const srcTable = s.table || s.source_table || s.source_table_name || s.table_name || '';
+                      const loadType = s.type_of_load || s.load_type || 'Truncate and load';
+                      const freq = s.frequency || 'Daily';
+                      const sched = s.schedule_time || s.schedule || s.run_time || '—';
+                      const status = s.status || s.active || 'Active';
+
+                      return (
+                        <tr
+                          key={idx}
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => setSelectedSourceTable(s)}
+                          title="Click to inspect source table details"
+                        >
+                          <td>{idx + 1}</td>
+                          <td style={{ fontWeight: 600, color: 'var(--text)' }}>
+                            {srcSystem}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                            {srcDb}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                            {srcSchema}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--link)' }}>
+                            {srcTable}
+                          </td>
+                          <td>
+                            <span className="badge" style={{
+                              background: String(loadType).toLowerCase().includes('append') ? 'rgba(245, 158, 11, 0.12)' : '#E8F0FE',
+                              color: String(loadType).toLowerCase().includes('append') ? '#f59e0b' : 'var(--accent-dark)',
+                              fontWeight: 600
+                            }}>
+                              {loadType}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '12px' }}>{freq}</td>
+                          <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>{sched}</td>
+                          <td>
+                            <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.12)', color: '#22c55e', fontWeight: 600 }}>
+                              {status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="btn-ghost"
+                              style={{ padding: '3px 8px', fontSize: '11.5px' }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedSourceTable(s);
+                              }}
+                            >
+                              Inspect ↗
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Tab: Rules */}
         {activeFileTab === 'rules' && (
           <div className="table-responsive-wrapper">
             <table className="enterprise-data-table">
@@ -584,84 +993,91 @@ export default function HlaStudioWorkbench({
                   <th>Rule ID</th>
                   <th>Rule Category</th>
                   <th>Target Dataset / Stream</th>
-                  <th>Filtration & Balance Criteria</th>
+                  <th>Filtration &amp; Balance Criteria</th>
                   <th>Severity</th>
                 </tr>
               </thead>
               <tbody>
-                {((filterRules.length > 0 || balanceRules.length > 0)
-                  ? [...filterRules, ...balanceRules]
-                  : [
-                    { rule_id: 'R1', category: 'Deduplication', target: 'dl_itsm_cmdb_daily_dump', description: 'Eliminate duplicate CI rows on ci_id taking latest modified timestamp', severity: 'MANDATORY' },
-                    { rule_id: 'R2', category: 'Null Key Check', target: 'dl_itsm_cmdb_daily_dump', description: 'Filter out rows where ip_address IS NULL or whitespace only', severity: 'MANDATORY' },
-                    { rule_id: 'R3', category: 'Deduplication', target: 'dl_vdom_firewall_audit_report', description: 'Distinct on vdom_name and mgmt_ip pair', severity: 'MANDATORY' },
-                    { rule_id: 'R4', category: 'Null Key Check', target: 'dl_vdom_firewall_audit_report', description: 'Exclude rows missing account_id', severity: 'MANDATORY' },
-                    { rule_id: 'R9', category: 'Scope Exclusion', target: 'dl_vdom_firewall_audit_report', description: 'Strip internal test firewall VDOM profiles matching regex ^test_.*', severity: 'CRITICAL' },
-                    { rule_id: 'R10', category: 'Scope Exclusion', target: 'dl_itsm_cmdb_daily_dump', description: 'Exclude loopback (127.0.0.1) and dummy RFC-1918 test subnets', severity: 'CRITICAL' },
-                    { rule_id: 'R11', category: 'Balance Gate', target: 'BALANCE_DATASET', description: 'Verify row counts across all 7 sources against previous 30-day baseline before passing to recon matching', severity: 'GATEKEEPER' },
-                  ]
-                ).map((r, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      <span className="badge" style={{ background: 'var(--navy)', color: '#fff', borderColor: 'var(--navy)' }}>
-                        {r.rule_id || `R${idx + 1}`}
-                      </span>
-                    </td>
-                    <td style={{ fontWeight: 600 }}>{r.category || r.rule_type || 'Validation'}</td>
-                    <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
-                      {r.data_stream || r.target || r.source_table || 'Core'}
-                    </td>
-                    <td style={{ fontSize: '12.5px', color: 'var(--text)' }}>
-                      {r.rule_statement || r.description || r.rule_description || '-'}
-                    </td>
-                    <td>
-                      <span className="badge" style={{ background: '#FEF3C7', color: '#92400E', borderColor: '#FCD34D' }}>
-                        {r.severity || 'MANDATORY'}
-                      </span>
+                {allRules.length > 0 ? (
+                  allRules.map((r, idx) => (
+                    <tr key={idx}>
+                      <td>
+                        <span className="badge" style={{ background: 'var(--navy)', color: '#fff', borderColor: 'var(--navy)' }}>
+                          {r.rule_id || `R${idx + 1}`}
+                        </span>
+                      </td>
+                      <td style={{ fontWeight: 600 }}>{r.category || r.rule_type || 'Validation'}</td>
+                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                        {r.data_stream || r.target || r.source_table || 'Core'}
+                      </td>
+                      <td style={{ fontSize: '12.5px', color: 'var(--text)' }}>
+                        {r.rule_statement || r.description || r.rule_description || '-'}
+                      </td>
+                      <td>
+                        <span className="badge" style={{ background: '#FEF3C7', color: '#92400E', borderColor: '#FCD34D' }}>
+                          {r.severity || 'MANDATORY'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                      No rules detected in this document.
                     </td>
                   </tr>
-                ))}
+                )}
               </tbody>
             </table>
           </div>
         )}
 
-        {/* Tab 3: Mappings */}
+        {/* Tab: Mappings */}
         {activeFileTab === 'mappings' && (
           <div>
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '13px', color: 'var(--text-mute)' }}>
+                  Showing {filteredMappings.length} mappings.
+                </span>
+                <button
+                  className={`btn-ghost ${mappingFilter === 'all' ? 'active' : ''}`}
+                  onClick={() => setMappingFilter('all')}
+                  style={{ fontSize: '12px', padding: '3px 8px' }}
+                >
+                  All
+                </button>
+                <button
+                  className={`btn-ghost ${mappingFilter === 'direct' ? 'active' : ''}`}
+                  onClick={() => setMappingFilter('direct')}
+                  style={{ fontSize: '12px', padding: '3px 8px' }}
+                >
+                  Direct (1:1)
+                </button>
+                <button
+                  className={`btn-ghost ${mappingFilter === 'derived' ? 'active' : ''}`}
+                  onClick={() => setMappingFilter('derived')}
+                  style={{ fontSize: '12px', padding: '3px 8px' }}
+                >
+                  Derived (Logic)
+                </button>
+              </div>
               <input
                 type="text"
-                placeholder="Filter target column, source field, or logic…"
+                placeholder="Search columns, source fields…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 style={{
-                  padding: '7px 12px',
-                  borderRadius: '4px',
-                  border: '1px solid var(--border-dark)',
-                  background: 'var(--card)',
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-card)',
                   color: 'var(--text)',
                   fontSize: '12.5px',
-                  minWidth: '280px',
+                  width: '260px',
                 }}
               />
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {['all', 'direct', 'derived'].map((f) => (
-                  <button
-                    key={f}
-                    onClick={() => setMappingFilter(f)}
-                    className={`btn-ghost ${mappingFilter === f ? 'active' : ''}`}
-                    style={{
-                      background: mappingFilter === f ? 'var(--navy)' : 'var(--card)',
-                      color: mappingFilter === f ? '#fff' : 'var(--text)',
-                    }}
-                  >
-                    {f.toUpperCase()}
-                  </button>
-                ))}
-              </div>
             </div>
-
             <div className="table-responsive-wrapper">
               <table className="enterprise-data-table">
                 <thead>
@@ -670,147 +1086,260 @@ export default function HlaStudioWorkbench({
                     <th>Target Column</th>
                     <th>Source Field</th>
                     <th>Source Table</th>
-                    <th>Type</th>
-                    <th>Transformation / Derivation Logic</th>
+                    <th>Mapping Type</th>
+                    <th>Derivation Logic</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredMappings.length > 0 ? filteredMappings : [
-                    { target_column: 'ci_id', source_field: 'ci_id', source_table: 'dl_itsm_cmdb_daily_dump', mapping_type: 'Direct', derivation_logic: 'Direct 1:1 pass-through' },
-                    { target_column: 'hostname', source_field: 'u_fqdn', source_table: 'dl_itsm_cmdb_daily_dump', mapping_type: 'Direct', derivation_logic: 'LOWER(TRIM(u_fqdn))' },
-                    { target_column: 'vdom_name', source_field: 'vdom_name', source_table: 'dl_vdom_firewall_audit_report', mapping_type: 'Direct', derivation_logic: 'Direct 1:1 pass-through' },
-                    { target_column: 'reconciled_status', source_field: '-', source_table: '-', mapping_type: 'Derived', derivation_logic: 'CASE WHEN cmdb.ip = vdom.ip THEN "YY" ELSE "YN" END' },
-                    { target_column: 'kri_flag', source_field: '-', source_table: '-', mapping_type: 'Derived', derivation_logic: 'CASE WHEN reconciled_status != "YY" THEN 1 ELSE 0 END' },
-                  ]).map((m, idx) => (
-                    <tr key={idx}>
-                      <td>{idx + 1}</td>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--link)' }}>
-                        {m.target_column}
-                      </td>
-                      <td style={{ fontFamily: 'var(--font-mono)' }}>{m.source_field || '-'}</td>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', color: 'var(--text-mute)' }}>
-                        {m.source_table || '-'}
-                      </td>
-                      <td>
-                        <span className="badge" style={{
-                          background: m.mapping_type === 'Derived' ? '#EDE9FE' : '#E8F0FE',
-                          color: m.mapping_type === 'Derived' ? '#6B21A8' : 'var(--accent-dark)',
-                          borderColor: m.mapping_type === 'Derived' ? '#DDD6FE' : '#C7D9FB'
-                        }}>
-                          {m.mapping_type || 'Direct'}
-                        </span>
-                      </td>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
-                        {m.derivation_logic || '1:1 Mapping'}
+                  {filteredMappings.length > 0 ? (
+                    filteredMappings.map((m, idx) => {
+                      const isDirect = (m.mapping_type || '').toLowerCase() === 'direct';
+                      return (
+                        <tr key={idx}>
+                          <td>{idx + 1}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent-dark)' }}>
+                            {m.target_column}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)' }}>{m.source_field || '-'}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--link)' }}>
+                            {m.source_table || '-'}
+                          </td>
+                          <td>
+                            <span
+                              className="badge"
+                              style={{
+                                background: isDirect ? 'rgba(16, 185, 129, 0.12)' : 'rgba(139, 92, 246, 0.12)',
+                                color: isDirect ? '#10b981' : '#8b5cf6',
+                                borderColor: isDirect ? 'rgba(16, 185, 129, 0.3)' : 'rgba(139, 92, 246, 0.3)',
+                                fontWeight: 700,
+                              }}
+                            >
+                              {m.mapping_type || 'Direct'}
+                            </span>
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text)' }}>
+                            {m.derivation_logic || '1:1 pass-through'}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ) : (
+                    <tr>
+                      <td colSpan={6} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                        No attribute mappings detected in this document.
                       </td>
                     </tr>
-                  ))}
+                  )}
                 </tbody>
               </table>
             </div>
           </div>
         )}
 
-        {/* Tab 4: Data Model */}
+        {/* Tab: Target Architecture (Data Model Objects Only) */}
         {activeFileTab === 'datamodel' && (
-          <div className="table-responsive-wrapper">
-            <table className="enterprise-data-table">
-              <thead>
-                <tr>
-                  <th>Target Dataset / Column</th>
-                  <th>Stage / Type</th>
-                  <th>Load Type / Nullable</th>
-                  <th>Standard Status / Key</th>
-                  <th>Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(dataModel.length > 0 ? dataModel : [
-                  { column_name: 'reconciliation_run_id', data_type: 'BIGINT', nullable: 'NO', key: 'PK', description: 'Surrogate primary key for reconciliation batch' },
-                  { column_name: 'ci_id', data_type: 'VARCHAR(64)', nullable: 'NO', key: 'FK', description: 'Unique Configuration Item identifier from CMDB' },
-                  { column_name: 'hostname', data_type: 'VARCHAR(255)', nullable: 'YES', key: '', description: 'Canonical lowercased FQDN hostname' },
-                  { column_name: 'ip_address', data_type: 'INET', nullable: 'NO', key: 'IDX', description: 'IPv4/IPv6 host network address' },
-                  { column_name: 'vdom_name', data_type: 'VARCHAR(128)', nullable: 'YES', key: '', description: 'Virtual Domain firewall context name' },
-                  { column_name: 'match_result', data_type: 'VARCHAR(16)', nullable: 'NO', key: '', description: 'YY (Matched), YN (Source Only), NY (Target Only)' },
-                  { column_name: 'kri_category', data_type: 'VARCHAR(32)', nullable: 'YES', key: '', description: 'Key Risk Indicator routing label (KRI 01–04)' },
-                ]).map((c, idx) => {
-                  const name = c.table_name || c.column_name || `Entity_${idx + 1}`;
-                  const type = c.stage || c.data_type || 'Staging';
-                  const status = c.load_type || c.nullable || 'Truncate & load';
-                  const keyOrStatus = c.standard_status || c.key || '';
-                  return (
-                    <tr key={idx}>
-                      <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--link)' }}>
-                        {name}
-                      </td>
-                      <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-dark)' }}>{type}</td>
-                      <td>{status}</td>
-                      <td>
-                        {keyOrStatus ? (
-                          <span className="badge" style={{ background: '#FEE2E2', color: '#991B1B', borderColor: '#FECACA' }}>
-                            {keyOrStatus}
-                          </span>
-                        ) : '-'}
-                      </td>
-                      <td style={{ color: 'var(--text-mute)', fontSize: '12px' }}>{c.description || '-'}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: 'var(--text)' }}>
+                  TARGET ARCHITECTURE ({dataModel.length} Target Object{dataModel.length === 1 ? '' : 's'})
+                </h3>
+                <p style={{ margin: '2px 0 0', fontSize: '12px', color: 'var(--text-mute)' }}>
+                  Target architecture and internal staging objects driven directly from the Data Model sheet.
+                </p>
+              </div>
+
+              <input
+                type="text"
+                placeholder="Search process stage, target table, type, description…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: '6px',
+                  border: '1px solid var(--border)',
+                  background: 'var(--bg-card)',
+                  color: 'var(--text)',
+                  fontSize: '12.5px',
+                  width: '280px',
+                }}
+              />
+            </div>
+
+            <div className="table-responsive-wrapper">
+              <table className="enterprise-data-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Process Stage</th>
+                    <th>Target Table</th>
+                    <th>Table Type</th>
+                    <th>Load Type</th>
+                    <th>Description</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(() => {
+                    let displayList = dataModel;
+                    if (searchQuery.trim()) {
+                      const q = searchQuery.toLowerCase();
+                      displayList = displayList.filter(dm =>
+                        (dm.stage || dm.layer || '').toLowerCase().includes(q) ||
+                        (dm.entity_name || dm.table_name || dm.table || '').toLowerCase().includes(q) ||
+                        (dm.standard_type || dm.type || '').toLowerCase().includes(q) ||
+                        (dm.load_type || dm.type_of_load || '').toLowerCase().includes(q) ||
+                        (dm.description || '').toLowerCase().includes(q)
+                      );
+                    }
+
+                    if (displayList.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={8} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                            No target architecture records found in the Data Model sheet.
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return displayList.map((dm, idx) => {
+                      const stage = dm.stage || dm.layer || 'Target Stage';
+                      const tbl = dm.entity_name || dm.table_name || dm.table || '';
+                      const tblType = dm.standard_type || dm.type || (dm.reuse_rebuild ? `Standard (${dm.reuse_rebuild})` : 'Standard Table');
+                      const loadType = dm.load_type || dm.type_of_load || 'Truncate and load';
+                      const desc = dm.description || 'Target architecture entity';
+                      const status = dm.status || 'Active';
+
+                      return (
+                        <tr
+                          key={idx}
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => setSelectedSourceTable(dm)}
+                          title="Click to inspect target table columns & schema"
+                        >
+                          <td>{idx + 1}</td>
+                          <td>
+                            <span style={{ fontWeight: 600, color: 'var(--text)' }}>
+                              {stage}
+                            </span>
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#a855f7' }}>
+                            {tbl}
+                          </td>
+                          <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                            {tblType}
+                          </td>
+                          <td>
+                            <span className="badge" style={{
+                              background: String(loadType).toLowerCase().includes('append') ? 'rgba(245, 158, 11, 0.12)' : '#E8F0FE',
+                              color: String(loadType).toLowerCase().includes('append') ? '#f59e0b' : 'var(--accent-dark)',
+                              fontWeight: 600
+                            }}>
+                              {loadType}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '320px' }}>
+                            {desc}
+                          </td>
+                          <td>
+                            <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.12)', color: '#22c55e', fontWeight: 600 }}>
+                              {status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="btn-ghost"
+                              style={{ padding: '3px 8px', fontSize: '11.5px' }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedSourceTable(dm);
+                              }}
+                            >
+                              Inspect ↗
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
-        {/* Tab 5: Buckets & KRI */}
+        {/* Tab: Buckets & KRI */}
         {activeFileTab === 'buckets' && (
           <div className="table-responsive-wrapper">
             <table className="enterprise-data-table">
               <thead>
                 <tr>
-                  <th>Bucket Code</th>
-                  <th>Reconciliation State</th>
-                  <th>Routing Policy</th>
-                  <th>Action Trigger</th>
-                  <th>KRI Classification</th>
+                  <th>Bucket / Code</th>
+                  <th>Description / State</th>
+                  <th>KRI Risk Level</th>
+                  <th>Operational Action</th>
                 </tr>
               </thead>
               <tbody>
-                {(buckets.length > 0 ? buckets : [
-                  { code: 'YY', state: 'Matched (Both Present)', policy: 'Auto-reconciled clean record', action: 'Archive to reconciliation master warehouse', kri: 'Non-KRI (Compliant)' },
-                  { code: 'YN', state: 'CMDB Present / VDOM Missing', policy: 'Firewall profile missing for active host', action: 'Trigger ITSM ticket for Network SecOps audit', kri: 'KRI 01 (Missing Security Control)' },
-                  { code: 'NY', state: 'VDOM Present / CMDB Missing', policy: 'Unregistered shadow IT firewall profile', action: 'Trigger ITAM onboarding & CMDB registration', kri: 'KRI 02 (Unregistered Asset)' },
-                  { code: 'DIFF', state: 'Attribute Mismatch', policy: 'IP address matches but hostname differs', action: 'Route to Data Governance reconciliation desk', kri: 'KRI 03 (Data Divergence)' },
-                ]).map((b, idx) => {
-                  const code = b.bucket_id || b.code || `B${idx + 1}`;
-                  const state = b.description || b.state || 'Unspecified';
-                  const policy = b.logic || b.policy || 'Standard filter policy';
-                  const action = b.impact_calculation || b.remarks || b.action || '-';
-                  const kri = b.kri_id || b.kri || 'Non-KRI';
-                  const isNonKri = String(kri).toLowerCase().includes('non') || kri === '-';
-
-                  return (
+                {buckets.length > 0 ? (
+                  buckets.map((b, idx) => (
                     <tr key={idx}>
                       <td>
-                        <span className="badge" style={{
-                          background: code === 'YY' ? '#E7F7EE' : '#FEE2E2',
-                          color: code === 'YY' ? 'var(--good)' : 'var(--bad)',
-                          borderColor: code === 'YY' ? '#BEE8CE' : '#FECACA',
-                          fontWeight: 700
-                        }}>
-                          {code}
+                        <span className="badge" style={{ background: 'var(--navy)', color: '#fff' }}>
+                          {b.bucket_id || b.code || `B${idx + 1}`}
                         </span>
                       </td>
-                      <td style={{ fontWeight: 600 }}>{state}</td>
-                      <td style={{ fontSize: '12.5px' }}>{policy}</td>
-                      <td style={{ fontSize: '12.5px', color: 'var(--text-mute)' }}>{action}</td>
+                      <td>{b.description || b.state || '-'}</td>
                       <td>
-                        <span className="badge" style={{
-                          background: isNonKri ? '#E8F0FE' : '#FEF3C7',
-                          color: isNonKri ? 'var(--accent-dark)' : '#92400E',
-                          borderColor: isNonKri ? '#C7D9FB' : '#FCD34D'
-                        }}>
-                          {kri}
+                        <span className="badge" style={{ background: '#FEE2E2', color: '#B91C1C' }}>
+                          {b.kri || 'Risk Low'}
                         </span>
+                      </td>
+                      <td>{b.action || '-'}</td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={4} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-mute)' }}>
+                      No reconciliation buckets detected in this document.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Tab: Discovered Sheets */}
+        {activeFileTab === 'raw_sheets' && (
+          <div className="table-responsive-wrapper">
+            <table className="enterprise-data-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Discovered Sheet Name</th>
+                  <th>Row Count</th>
+                  <th>Header Count</th>
+                  <th>Discovered Column Headers</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sheetNames.map((name, idx) => {
+                  const sInfo = rawSheets[name] || {};
+                  return (
+                    <tr key={idx}>
+                      <td>{idx + 1}</td>
+                      <td style={{ fontWeight: 700, color: 'var(--link)' }}>{name}</td>
+                      <td>
+                        <span className="badge" style={{ background: '#E0F2FE', color: '#0369A1' }}>
+                          {sInfo.row_count || 0} rows
+                        </span>
+                      </td>
+                      <td>{sInfo.header_count || (sInfo.original_headers || []).length} columns</td>
+                      <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>
+                        {(sInfo.original_headers || []).join(' · ') || 'None detected'}
                       </td>
                     </tr>
                   );
@@ -820,75 +1349,393 @@ export default function HlaStudioWorkbench({
           </div>
         )}
 
-        {/* Tab 6: Architecture Synthesis & Code */}
+        {/* Tab: Synthesis & Code */}
         {activeFileTab === 'synthesis' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-            <div className="conn-card">
-              <div className="name" style={{ fontSize: '15px', color: 'var(--text)' }}>
-                Executive Architecture Summary
+          <div style={{ background: 'var(--bg-card)', padding: '20px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+            <h3 style={{ margin: '0 0 8px 0', fontSize: '16px', color: 'var(--text)' }}>
+              Architecture Synthesis for {activeDoc.original_name || activeDoc.filename}
+            </h3>
+            <p style={{ fontSize: '13px', color: 'var(--text-mute)', margin: '0 0 16px 0' }}>
+              Synthesized purely from the {sheetNames.length} discovered sheets in this document without hardcoded assumptions.
+            </p>
+
+            {components.length > 0 && (
+              <div style={{ marginBottom: '16px' }}>
+                <h4 style={{ fontSize: '14px', color: 'var(--link)', margin: '0 0 6px 0' }}>
+                  Component Interaction Architecture:
+                </h4>
+                <pre style={{ padding: '12px', background: 'var(--navy)', color: '#E2E8F0', borderRadius: '6px', fontSize: '12.5px', overflowX: 'auto', lineHeight: '1.6' }}>
+{components.map((c, i) => `${i + 1}. [${c.component}] (${c.technology || 'Service'})\n   Consumes: ${c.input}\n   Responsibility: ${c.responsibility}\n   Produces: ${c.output}\n   Interaction: ${c.interaction}`).join('\n\n')}
+                </pre>
               </div>
-              <p style={{ color: 'var(--text-mute)', fontSize: '13px', lineHeight: 1.6, marginTop: '8px' }}>
-                {synthesis.executive_summary ||
-                  'The architecture ingests upstream operational feeds into an isolated staging zone, enforces deduplication and data quality filters, stages validated records through the balance gate, and applies key matching rules to segment results into compliant and exception buckets. Exceptions are automatically classified against risk indicators.'}
-              </p>
-            </div>
+            )}
 
-            <div className="conn-card">
-              <div className="name" style={{ fontSize: '14px', marginBottom: '8px' }}>
-                Generated PySpark / SQL ETL Pipeline Logic
+            {requirements.length > 0 && (
+              <div>
+                <h4 style={{ fontSize: '14px', color: 'var(--link)', margin: '0 0 6px 0' }}>
+                  Specification Requirements:
+                </h4>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '8px' }}>
+                  {requirements.map((r, i) => (
+                    <div key={i} style={{ padding: '10px 12px', background: 'var(--bg-subtle)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                        <span style={{ fontWeight: 700, color: 'var(--navy)' }}>{r.requirement}</span>
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: (r.priority || '').toLowerCase() === 'high' ? '#ef4444' : '#f59e0b' }}>
+                          {r.priority}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '12.5px', color: 'var(--text)', marginBottom: '4px' }}>{r.description}</div>
+                      {r.acceptance_criteria && (
+                        <div style={{ fontSize: '11.5px', color: 'var(--text-mute)', fontStyle: 'italic' }}>
+                          Acceptance: {r.acceptance_criteria}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
-              <pre
-                style={{
-                  background: 'var(--navy-dark)',
-                  color: '#e2e8f0',
-                  padding: '16px',
-                  borderRadius: '6px',
-                  fontSize: '12px',
-                  fontFamily: 'var(--font-mono)',
-                  overflowX: 'auto',
-                  lineHeight: 1.5,
-                }}
-              >
-{`# ═════════════════════════════════════════════════════════════════
-# HLA STUDIO — AUTOMATED ETL RECONCILIATION PIPELINE
-# ═════════════════════════════════════════════════════════════════
-
-from pyspark.sql import functions as F
-
-# Stage 1: Load Source Datasets (Truncate & Reload)
-cmdb_df = spark.table("dl_itsm_cmdb_daily_dump")
-vdom_df = spark.table("dl_vdom_firewall_audit_report")
-
-# Stage 2: R1-R10 Quality & Filter Rules
-clean_cmdb = cmdb_df.dropDuplicates(["ci_id"]).filter(F.col("ip_address").isNotNull())
-clean_vdom = vdom_df.dropDuplicates(["vdom_name", "mgmt_ip"]).filter(~F.col("vdom_name").rlike("^test_.*"))
-
-# Stage 3: R11 Balance Gate Verification
-cmdb_count = clean_cmdb.count()
-vdom_count = clean_vdom.count()
-assert cmdb_count > 0 and vdom_count > 0, "R11 Balance Gate: Ingestion count check failed"
-
-# Stage 4: Recon Matching (IP Exact & Hostname)
-matched_df = clean_cmdb.join(
-    clean_vdom,
-    clean_cmdb.ip_address == clean_vdom.mgmt_ip,
-    "full_outer"
-).select(
-    clean_cmdb.ci_id,
-    clean_cmdb.hostname.alias("cmdb_hostname"),
-    clean_vdom.vdom_name,
-    F.when(clean_cmdb.ip_address.isNotNull() & clean_vdom.mgmt_ip.isNotNull(), "YY")
-     .when(clean_cmdb.ip_address.isNotNull(), "YN")
-     .otherwise("NY").alias("match_result")
-)
-
-# Stage 5: Output Buckets & KRI Routing
-matched_df.write.mode("overwrite").saveAsTable("reconciliation_final")`}
-              </pre>
-            </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* ── Source Table Details Modal / Drawer (100% Document-Driven) ── */}
+      {selectedSourceTable && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setSelectedSourceTable(null)}
+          style={{ zIndex: 10000 }}
+        >
+          <div
+            className="target-config-modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: '840px',
+              width: '95%',
+              maxHeight: '88vh',
+              display: 'flex',
+              flexDirection: 'column',
+              background: 'var(--bg-card)',
+              borderRadius: '12px',
+              boxShadow: '0 25px 60px -10px rgba(0, 0, 0, 0.7)',
+              border: '1px solid var(--border)',
+              overflow: 'hidden',
+            }}
+          >
+            {/* Modal Header */}
+            <div
+              className="modal-header"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '16px 20px',
+                borderBottom: '1px solid var(--border)',
+                background: 'var(--bg-surface)',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '20px' }}>🗄️</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: 'var(--text)' }}>
+                    Source Table Details
+                  </h3>
+                  <span style={{ fontSize: '12px', color: 'var(--text-mute)', fontFamily: 'var(--font-mono)' }}>
+                    {selectedSourceTable.full_table_name ||
+                      (selectedSourceTable.schema
+                        ? `${selectedSourceTable.schema}.${selectedSourceTable.source_table_name || selectedSourceTable.table_name}`
+                        : selectedSourceTable.source_table_name || selectedSourceTable.table_name)}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setSelectedSourceTable(null)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  fontSize: '20px',
+                  color: 'var(--text-mute)',
+                  cursor: 'pointer',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                }}
+                title="Close (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div
+              style={{
+                padding: '20px',
+                overflowY: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '18px',
+              }}
+            >
+              {/* Top Metadata Grid */}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                  gap: '12px',
+                  padding: '16px',
+                  background: 'var(--bg-subtle)',
+                  borderRadius: '8px',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Source ID
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
+                    <span className="badge" style={{ background: '#F1F5F9', color: '#1E293B', fontWeight: 700 }}>
+                      {selectedSourceTable.source_id || 'SRC001'}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Source / Database
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', fontWeight: 700, color: 'var(--text)' }}>
+                    {selectedSourceTable.database || selectedSourceTable.source_name || selectedSourceTable.database_name || selectedSourceTable.source_system || selectedSourceTable.source_db || 'Default'}
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Schema
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', fontFamily: 'var(--font-mono)' }}>
+                    <span className="badge" style={{ background: '#E0E7FF', color: '#3730A3', fontWeight: 700 }}>
+                      {selectedSourceTable.schema_name || selectedSourceTable.schema || selectedSourceTable.source_schema || 'public'}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Table
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--link)' }}>
+                    {selectedSourceTable.table_name || selectedSourceTable.source_table || selectedSourceTable.source_table_name || selectedSourceTable.table || '-'}
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Type of Load
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px' }}>
+                    <span className="badge" style={{ background: '#FEF3C7', color: '#92400E', fontWeight: 600 }}>
+                      {selectedSourceTable.load_type || selectedSourceTable.type_of_load || 'Truncate and load'}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Frequency
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', fontWeight: 600 }}>
+                    {selectedSourceTable.frequency || selectedSourceTable.refresh_time || 'Daily'}
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Schedule Time
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', fontFamily: 'var(--font-mono)' }}>
+                    {selectedSourceTable.schedule_time || selectedSourceTable.schedule || '-'}
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Active
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px' }}>
+                    <span className="badge" style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', fontWeight: 700 }}>
+                      {selectedSourceTable.active || 'Yes'}
+                    </span>
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Approximate End Time
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '13px', color: 'var(--text-mute)' }}>
+                    {selectedSourceTable.approximate_end_time || selectedSourceTable.approx_end_time || selectedSourceTable.end_time || '-'}
+                  </div>
+                </div>
+
+                <div>
+                  <span style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-mute)', fontWeight: 700 }}>
+                    Source Document Provenance
+                  </span>
+                  <div style={{ marginTop: '3px', fontSize: '12.5px' }}>
+                    <span className="badge" style={{ background: '#F1F5F9', color: '#334155' }}>
+                      Sheet: {selectedSourceTable.sheet_name || 'Source Systems'} · Row #{selectedSourceTable.source_row || selectedSourceTable.row_index || 1}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Related Target Attributes */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <h4 style={{ margin: 0, fontSize: '13.5px', color: 'var(--text)', fontWeight: 700 }}>
+                    🎯 Related Target Attributes ({relatedTargetAttributes.length})
+                  </h4>
+                  <span style={{ fontSize: '11.5px', color: 'var(--text-mute)' }}>
+                    Extracted from document mapping matrix
+                  </span>
+                </div>
+                {relatedTargetAttributes.length > 0 ? (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {relatedTargetAttributes.map((attr, idx) => (
+                      <span
+                        key={idx}
+                        className="badge"
+                        style={{
+                          background: 'rgba(59, 130, 246, 0.1)',
+                          color: 'var(--link)',
+                          borderColor: 'rgba(59, 130, 246, 0.3)',
+                          fontFamily: 'var(--font-mono)',
+                          fontWeight: 600,
+                        }}
+                      >
+                        {attr}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '12.5px', color: 'var(--text-mute)', padding: '8px 12px', background: 'var(--bg-subtle)', borderRadius: '6px' }}>
+                    No target attributes explicitly reference this table name in the mapping matrix.
+                  </div>
+                )}
+              </div>
+
+              {/* Related Attribute Mappings */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <h4 style={{ margin: 0, fontSize: '13.5px', color: 'var(--text)', fontWeight: 700 }}>
+                    🔗 Linked Attribute Mappings ({relatedSourceMappings.length})
+                  </h4>
+                </div>
+                {relatedSourceMappings.length > 0 ? (
+                  <div className="table-responsive-wrapper" style={{ maxHeight: '220px', overflowY: 'auto' }}>
+                    <table className="enterprise-data-table" style={{ fontSize: '12px' }}>
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>Target Column</th>
+                          <th>Source Field</th>
+                          <th>Mapping Type</th>
+                          <th>Derivation Logic</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {relatedSourceMappings.map((m, idx) => (
+                          <tr key={idx}>
+                            <td>{idx + 1}</td>
+                            <td style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent-dark)' }}>
+                              {m.target_column}
+                            </td>
+                            <td style={{ fontFamily: 'var(--font-mono)' }}>{m.source_field || '-'}</td>
+                            <td>
+                              <span className="badge" style={{ background: (m.mapping_type || '').toLowerCase() === 'direct' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(139, 92, 246, 0.12)', color: (m.mapping_type || '').toLowerCase() === 'direct' ? '#10b981' : '#8b5cf6' }}>
+                                {m.mapping_type || 'Direct'}
+                              </span>
+                            </td>
+                            <td style={{ color: 'var(--text-mute)' }}>{m.derivation_logic || '1:1 pass-through'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '12.5px', color: 'var(--text-mute)', padding: '8px 12px', background: 'var(--bg-subtle)', borderRadius: '6px' }}>
+                    No attribute mappings found specifically linked to this source dataset.
+                  </div>
+                )}
+              </div>
+
+              {/* Related Business & Filter Rules */}
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <h4 style={{ margin: 0, fontSize: '13.5px', color: 'var(--text)', fontWeight: 700 }}>
+                    📋 Linked Business &amp; Filter Rules ({relatedSourceRules.length})
+                  </h4>
+                </div>
+                {relatedSourceRules.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '200px', overflowY: 'auto' }}>
+                    {relatedSourceRules.map((r, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          padding: '10px 12px',
+                          background: 'var(--bg-subtle)',
+                          borderRadius: '6px',
+                          border: '1px solid var(--border)',
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: '10px',
+                        }}
+                      >
+                        <span className="badge" style={{ background: 'var(--navy)', color: '#fff', flexShrink: 0 }}>
+                          {r.rule_id || `R${idx + 1}`}
+                        </span>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' }}>
+                            <strong style={{ fontSize: '12.5px' }}>{r.category || r.rule_type || 'Rule'}</strong>
+                            <span style={{ fontSize: '11px', color: 'var(--text-mute)', fontFamily: 'var(--font-mono)' }}>
+                              Stream: {r.data_stream || r.target || 'Core'}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: '12px', color: 'var(--text)' }}>
+                            {r.rule_statement || r.description || r.rule_description || '-'}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '12.5px', color: 'var(--text-mute)', padding: '8px 12px', background: 'var(--bg-subtle)', borderRadius: '6px' }}>
+                    No specific filter rules explicitly reference this dataset.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div
+              className="modal-footer"
+              style={{
+                padding: '12px 20px',
+                borderTop: '1px solid var(--border)',
+                background: 'var(--bg-surface)',
+                display: 'flex',
+                justifyContent: 'flex-end',
+              }}
+            >
+              <button
+                className="btn-ghost"
+                onClick={() => setSelectedSourceTable(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

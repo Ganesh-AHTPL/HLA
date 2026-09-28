@@ -75,20 +75,20 @@ export default function RoleInfoModal({ isOpen, onClose, currentUser, onOpenUser
         </div>
 
         <div className="rules-modal-body">
-          <div style={{ background: 'rgba(15, 23, 42, 0.6)', border: '1px solid rgba(255, 255, 255, 0.08)', borderRadius: '12px', overflow: 'hidden' }}>
+          <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)', borderRadius: '12px', overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem' }}>
               <thead>
-                <tr style={{ background: '#090e1a', borderBottom: '1px solid rgba(255, 255, 255, 0.1)' }}>
-                  <th style={{ padding: '0.75rem 1rem', textAlign: 'left', color: '#94a3b8' }}>Platform Capability</th>
+                <tr style={{ background: 'var(--bg-surface-elevated)', borderBottom: '1px solid var(--border-subtle)' }}>
+                  <th style={{ padding: '0.75rem 1rem', textAlign: 'left', color: 'var(--text-muted)' }}>Platform Capability</th>
                   <th style={{ padding: '0.75rem 0.5rem', textAlign: 'center', color: '#fb7185' }}>👑 Admin</th>
                   <th style={{ padding: '0.75rem 0.5rem', textAlign: 'center', color: '#38bdf8' }}>🛠️ Architect</th>
-                  <th style={{ padding: '0.75rem 0.5rem', textAlign: 'center', color: '#94a3b8' }}>👁️ Viewer</th>
+                  <th style={{ padding: '0.75rem 0.5rem', textAlign: 'center', color: 'var(--text-muted)' }}>👁️ Viewer</th>
                 </tr>
               </thead>
               <tbody>
                 {matrix.map((row, i) => (
-                  <tr key={i} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.04)' }}>
-                    <td style={{ padding: '0.65rem 1rem', color: '#f8fafc', fontWeight: 600 }}>{row.capability}</td>
+                  <tr key={i} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                    <td style={{ padding: '0.65rem 1rem', color: 'var(--text-primary)', fontWeight: 600 }}>{row.capability}</td>
                     <td style={{ padding: '0.65rem 0.5rem', textAlign: 'center', fontSize: '1.1rem' }}>
                       {row.admin ? '✅' : '—'}
                     </td>

@@ -627,7 +627,7 @@ schema = target_prod`
                 <label htmlFor="vault-file-input" className="vault-drop-label" style={{ gap: '0.65rem' }}>
                   <span style={{ fontSize: '1.4rem' }}>📁</span>
                   <div>
-                    <span style={{ color: '#ffffff', fontWeight: 700, fontSize: '0.85rem' }}>
+                    <span style={{ color: 'var(--text-primary)', fontWeight: 700, fontSize: '0.85rem' }}>
                       {vaultFile ? vaultFile.name : 'Choose a .kdb / Vault file or drag & drop'}
                     </span>
                     <span style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-muted)' }}>

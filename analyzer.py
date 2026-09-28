@@ -283,30 +283,47 @@ def extract_source_inventory(doc):
             source_schema = "public"
             source_table = tbl_name
             source_db = ""
+            if db_schema:
+                source_db = db_schema.strip()
 
             if "." in tbl_name:
-                p = tbl_name.split(".", 1)
-                source_schema, source_table = p[0].strip(), p[1].strip()
+                dot_parts = [p.strip() for p in tbl_name.split(".") if p.strip()]
+                if len(dot_parts) >= 2:
+                    source_schema, source_table = dot_parts[0], dot_parts[1]
+                else:
+                    source_table = dot_parts[0]
             elif "." in db_schema:
                 p = db_schema.split(".", 1)
                 source_db, source_schema = p[0].strip(), p[1].strip()
-            elif db_schema:
-                source_db = db_schema
 
+            if source_schema and source_table.lower().startswith(source_schema.lower() + "."):
+                source_table = source_table[len(source_schema)+1:].strip()
+
+            full_t = f"{source_schema}.{source_table}" if source_schema else source_table
             load_category = "Append" if "append" in load_type.lower() else "Truncate and load"
 
             key = f"{src_sys}:{source_db}:{source_schema}:{source_table}"
             if key not in seen:
                 seen.add(key)
                 sources.append({
-                    "full_table_name": f"{source_schema}.{source_table}" if source_schema != "public" else source_table,
-                    "source_system": src_sys,
-                    "source_db": source_db,
+                    "source_id": f"SRC{len(sources)+1:03d}",
+                    "full_table_name": full_t,
+                    "source_name": src_sys or source_db or "Default",
+                    "source_system": src_sys or source_db or "Default",
+                    "database": source_db or "Default",
+                    "source_db": source_db or "Default",
+                    "database_name": source_db or "Default",
+                    "schema": source_schema,
+                    "schema_name": source_schema,
                     "source_schema": source_schema,
+                    "table": source_table,
+                    "table_name": source_table,
+                    "source_table_name": source_table,
                     "source_table": source_table,
                     "frequency": freq,
                     "refresh_time": freq,
                     "type_of_load": load_category,
+                    "load_type": load_category,
                     "raw_load_notes": load_type
                 })
 

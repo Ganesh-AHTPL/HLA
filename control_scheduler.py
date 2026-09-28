@@ -16,6 +16,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from db_fetcher import find_table_across_databases, get_env_db_password, build_connection_url
 from sqlalchemy import create_engine, text, inspect
+from backend.services.db_manager import DatabaseManager
 from target_logic_builder import (
     generate_target_ddl,
     generate_transformation_sql,
@@ -638,8 +639,7 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
 
             # Dynamically inspect live target schema and synchronize transformation SQL
             try:
-                target_url = build_connection_url(target_cfg)
-                t_eng = create_engine(target_url, connect_args={"connect_timeout": 12} if "sqlite" not in target_url else {})
+                t_eng = DatabaseManager.get_engine(target_cfg)
                 live_meta = inspect_target_schema(t_eng, target_schema)
                 transform_sql = generate_transformation_sql(
                     target_schema,
@@ -663,6 +663,7 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
             valid_sql, valid_msg, sql_diags = validate_transformation_pipeline_against_schema(
                 target_cfg,
                 transform_sql,
+                ddl_script=ddl_script,
                 strict_not_null=False
             )
             if not valid_sql:
@@ -671,12 +672,9 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
                     f"Transformation pipeline aborted by pre-execution schema validator:\n{valid_msg}"
                 )
 
-            target_url = build_connection_url(target_cfg)
-            target_engine = create_engine(target_url, connect_args={"connect_timeout": 12} if "sqlite" not in target_url else {})
-
             statements = _split_sql_statements(transform_sql)
             executed_stmts = 0
-            with target_engine.connect() as conn:
+            with DatabaseManager.connect(target_cfg) as conn:
                 for stmt in statements:
                     clean_stmt = stmt.strip()
                     if clean_stmt and _has_executable_sql(clean_stmt):
@@ -695,7 +693,7 @@ def execute_control_pipeline(document_id: int, project_id: int, environment: str
 
             # 4C. Query and verify populated rows in respective target tables
             target_counts = {}
-            with target_engine.connect() as conn:
+            with DatabaseManager.connect(target_cfg) as conn:
                 for tbl in (deployed_tables or []):
                     try:
                         quoted_schema = f'"{target_schema}"' if ("." in target_schema or "-" in target_schema) else target_schema

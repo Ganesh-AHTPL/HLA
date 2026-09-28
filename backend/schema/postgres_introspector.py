@@ -24,8 +24,59 @@ class PostgresSchemaIntrospector:
         Introspects an exact table or view in PostgreSQL.
         Returns TableIntrospectionResult containing all columns in physical ordinal position order.
         """
-        schema_clean = schema_name.strip().strip('"').lower()
-        table_clean = table_name.strip().strip('"').lower()
+        schema_clean = schema_name.strip().strip('"').lower() if schema_name else ""
+        table_clean = table_name.strip().strip('"').lower() if table_name else ""
+
+        # Defensively handle qualified table names e.g. "schema.table" or "db.schema.table"
+        if "." in table_clean:
+            parts = [p.strip().strip('"').lower() for p in table_clean.split(".")]
+            if len(parts) == 2:
+                if not schema_clean or schema_clean == parts[0]:
+                    schema_clean = parts[0]
+                    table_clean = parts[1]
+                else:
+                    table_clean = parts[1]
+            elif len(parts) == 3:
+                schema_clean = parts[1]
+                table_clean = parts[2]
+
+        if not schema_clean:
+            schema_clean = "public"
+
+        columns: Dict[str, ColumnIntrospectionResult] = {}
+        exists = False
+
+        if self.engine.dialect.name != "postgresql":
+            from sqlalchemy import inspect as sqla_inspect
+            inspector = sqla_inspect(self.engine)
+            target_schema = schema_clean if schema_clean != "public" else None
+            try:
+                t_names = inspector.get_table_names(schema=target_schema)
+            except Exception:
+                t_names = inspector.get_table_names()
+            exists = table_clean in t_names or f"{schema_clean}.{table_clean}" in t_names
+            if exists:
+                try:
+                    for c in inspector.get_columns(table_clean, schema=target_schema):
+                        c_name = c["name"]
+                        columns[c_name.lower()] = ColumnIntrospectionResult(
+                            column_name=c_name,
+                            data_type=str(c.get("type")),
+                            is_nullable=bool(c.get("nullable", True)),
+                            column_default=str(c.get("default")),
+                            ordinal_position=len(columns) + 1
+                        )
+                except Exception:
+                    pass
+            return TableIntrospectionResult(
+                schema_name=schema_clean,
+                table_name=table_clean,
+                exists=exists,
+                columns=columns,
+                primary_keys=[],
+                indexes=[],
+                row_count=0
+            )
 
         # Check existence and columns via information_schema
         col_query = text("""

@@ -394,6 +394,8 @@ class TargetArtifact(db.Model):
     generated_transformation_sql = db.Column(db.Text, nullable=True)
     generated_pyspark_code = db.Column(db.Text, nullable=True)
     target_schema_json = db.Column(db.JSON, nullable=True)
+    source_metadata_json = db.Column(db.JSON, nullable=True)
+    source_mapping_json = db.Column(db.JSON, nullable=True)
     llm_reasoning = db.Column(db.Text, nullable=True)
     deployment_status = db.Column(db.String(50), default="draft", nullable=False)  # 'draft', 'validated', 'deployed', 'failed'
     deployment_log = db.Column(db.Text, nullable=True)
@@ -416,6 +418,10 @@ class TargetArtifact(db.Model):
             "generated_transformation_sql": self.generated_transformation_sql or "",
             "generated_pyspark_code": self.generated_pyspark_code or "",
             "target_schema_json": self.target_schema_json or {},
+            "source_metadata_json": self.source_metadata_json or {},
+            "source_mapping_json": self.source_mapping_json or [],
+            "source_metadata": self.source_metadata_json or {},
+            "source_mapping": self.source_mapping_json or [],
             "llm_reasoning": self.llm_reasoning or "",
             "deployment_status": self.deployment_status,
             "deployment_log": self.deployment_log or "",

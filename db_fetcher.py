@@ -1,6 +1,7 @@
 import os
 import io
 import re
+from typing import Tuple, Optional, List, Dict, Any
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.engine import URL
@@ -397,6 +398,9 @@ def fetch_s3_table_metadata(config, table_name):
         }
 
 
+from backend.services.db_manager import DatabaseManager
+
+
 def test_db_connection(config):
     """
     Tests connectivity to the specified database configuration or S3 bucket.
@@ -407,9 +411,7 @@ def test_db_connection(config):
         return True, "Sandbox Connection Active (Simulated Enterprise DB)"
 
     try:
-        url = build_connection_url(config)
-        engine = create_engine(url, connect_args={"connect_timeout": 5} if "sqlite" not in url else {})
-        with engine.connect() as conn:
+        with DatabaseManager.connect(config) as conn:
             conn.execute(text("SELECT 1"))
         return True, f"Successfully connected to {db_type.upper()} database"
     except Exception as e:
@@ -433,8 +435,7 @@ def scan_source_database(config, schema_name=None):
         }
 
     try:
-        url = build_connection_url(config)
-        engine = create_engine(url, connect_args={"connect_timeout": 6} if "sqlite" not in url else {})
+        engine = DatabaseManager.get_engine(config)
         inspector = inspect(engine)
         
         target_schema = schema_name if schema_name and schema_name != "public" else None
@@ -516,17 +517,19 @@ def fetch_table_metadata(config, schema_name, table_name):
         return get_simulated_schema(schema_name, table_name)
 
     try:
-        url = build_connection_url(config)
-        engine = create_engine(url, connect_args={"connect_timeout": 6} if "sqlite" not in url else {})
+        engine = DatabaseManager.get_engine(config)
         inspector = inspect(engine)
 
-        clean_search = table_name.strip().lower()
+        clean_search = table_name.strip().strip('"').lower() if table_name else ""
         if "." in clean_search:
-            # If qualified name passed e.g. "cmdb.dl_itsm_cmdb_daily_dump"
-            parts = clean_search.split(".", 1)
-            if not schema_name:
-                schema_name = parts[0]
-            clean_search = parts[1]
+            parts = [p.strip().strip('"') for p in clean_search.split(".")]
+            if len(parts) == 2:
+                if not schema_name or schema_name == "public":
+                    schema_name = parts[0]
+                clean_search = parts[1]
+            elif len(parts) == 3:
+                schema_name = parts[1]
+                clean_search = parts[2]
 
         # 1. Discover accessible source schemas (strictly EXCLUDING target/system schemas)
         all_schemas = []
@@ -547,7 +550,7 @@ def fetch_table_metadata(config, schema_name, table_name):
         requested_schema = (schema_name or "").strip()
 
         # Candidate schemas:
-        # If the table has an explicit requested schema (e.g. from qualified name 'cmdb.table'), search that.
+        # If the table has an explicit requested schema, search that.
         # Otherwise, search across ALL discovered schemas in the database so user doesn't need to specify a schema!
         if requested_schema:
             candidate_schemas = [requested_schema]
@@ -562,14 +565,9 @@ def fetch_table_metadata(config, schema_name, table_name):
             for s in all_schemas:
                 if s.lower() == cand.lower() and s not in search_schemas:
                     search_schemas.append(s)
-                    break
-
         schema_exists = len(search_schemas) > 0
-
-        matched_schema = None
-        matched_table = None
         all_existing_inventory = []
-
+        matching_schemas = []
         for s in search_schemas:
             try:
                 tbls = inspector.get_table_names(schema=s)
@@ -582,33 +580,38 @@ def fetch_table_metadata(config, schema_name, table_name):
             
             for t in (tbls + vws):
                 all_existing_inventory.append(f"{s}.{t}" if s != "public" else t)
-                if t.lower() == clean_search or t.lower() == clean_search.split(".")[-1]:
-                    matched_table = t
-                    matched_schema = s
-                    break
-            if matched_table:
-                break
+                if t.lower() == clean_search:
+                    matching_schemas.append((s, t))
+
+        if len(matching_schemas) == 1:
+            matched_schema, matched_table = matching_schemas[0]
+            is_ambiguous = False
+        elif len(matching_schemas) > 1:
+            matched_schema, matched_table = matching_schemas[0]
+            is_ambiguous = True
+        else:
+            matched_schema, matched_table = None, None
+            is_ambiguous = False
 
         db_name = config.get('database_name') or config.get('source_db_name') or 'source_db'
 
-        # 3. IF TABLE OR SCHEMA NOT FOUND IN GIVEN CONNECTION:
+        # 3. IF TABLE NOT FOUND IN GIVEN CONNECTION:
         if not matched_table:
-            if requested_schema and not schema_exists:
-                msg = f"Table '{table_name}' NOT FOUND: Schema '{schema_name}' does not exist in source database '{db_name}'. Scanned schemas: {search_schemas}."
-            else:
-                target_sc_display = schema_name or conn_schema
-                msg = f"Table '{table_name}' NOT FOUND in schema '{target_sc_display}' of source database '{db_name}'. Table does not exist."
+            effective_schema = requested_schema or ""
+            msg = f"SOURCE TABLE NOT FOUND:\nSource: {db_name}\nSchema: {effective_schema or 'All accessible source DB schemas'}\nTable: {clean_search}"
 
             return {
                 "table_found": False,
+                "is_ambiguous": False,
                 "schema_found": schema_exists,
                 "status": "table_not_found",
                 "is_simulated": False,
-                "schema_name": schema_name or conn_schema,
-                "table_name": table_name,
+                "schema_name": effective_schema,
+                "table_name": clean_search,
+                "full_table_name": f"{effective_schema}.{clean_search}" if effective_schema else clean_search,
                 "columns": [],
                 "sample_rows": [],
-                "row_count": 0,
+                "row_count": None,
                 "existing_tables_in_db": all_existing_inventory[:30],
                 "total_tables_in_db": len(all_existing_inventory),
                 "ddl_pulled": False,
@@ -639,15 +642,15 @@ def fetch_table_metadata(config, schema_name, table_name):
 
         # Fetch row count and sample rows
         full_table = f'"{matched_schema}"."{matched_table}"' if matched_schema else f'"{matched_table}"'
-        row_count = 0
+        row_count = None
         sample_rows = []
         try:
             with engine.connect() as conn:
                 try:
                     cnt_res = conn.execute(text(f"SELECT COUNT(*) FROM {full_table}"))
-                    row_count = cnt_res.scalar() or 0
+                    row_count = cnt_res.scalar()
                 except Exception:
-                    row_count = 0
+                    row_count = None
 
                 try:
                     sample_res = conn.execute(text(f"SELECT * FROM {full_table} LIMIT 5"))
@@ -681,11 +684,13 @@ def fetch_table_metadata(config, schema_name, table_name):
             except Exception:
                 pass
 
+        final_schema = matched_schema or schema_name or "public"
         return {
             "table_found": True,
             "is_simulated": False,
-            "schema_name": schema_name or "public",
+            "schema_name": final_schema,
             "table_name": matched_table,
+            "full_table_name": f"{final_schema}.{matched_table}" if final_schema != "public" else matched_table,
             "columns": columns,
             "primary_keys": pk_cols,
             "sample_rows": sample_rows,
@@ -697,11 +702,13 @@ def fetch_table_metadata(config, schema_name, table_name):
         }
 
     except Exception as err:
+        effective_schema = schema_name or "public"
         return {
             "table_found": False,
             "is_simulated": False,
-            "schema_name": schema_name or "public",
+            "schema_name": effective_schema,
             "table_name": table_name,
+            "full_table_name": f"{effective_schema}.{table_name}" if effective_schema != "public" else table_name,
             "columns": [],
             "sample_rows": [],
             "row_count": 0,
@@ -710,45 +717,324 @@ def fetch_table_metadata(config, schema_name, table_name):
         }
 
 
-def find_table_across_databases(source_configs: list, schema_name: str, table_name: str) -> dict:
+def resolve_source_connection_for_table(source_table: dict, source_configs: list) -> Tuple[Optional[dict], str, list]:
     """
-    Searches for a table across multiple configured source databases.
-    If the source table is not found in one source DB, checks the other source DBs.
-    Returns the metadata from the database where the table is found.
-    If not found in any source database, returns table_found=False and reports all scanned databases.
+    Dynamically resolves the database connection for a source table using normalized metadata.
+    Returns: (resolved_cfg, status, candidate_matches)
+    Statuses: 'RESOLVED', 'NOT_CONFIGURED', 'AMBIGUOUS'
     """
     if not source_configs:
+        return None, "NOT_CONFIGURED", []
+
+    s_sys = str(source_table.get("source_system") or source_table.get("database") or source_table.get("connection_reference") or "").strip()
+    s_db = str(source_table.get("database") or source_table.get("database_name") or "").strip()
+
+    # Match against source configs by normalized tokens
+    matches = []
+    for cfg in source_configs:
+        cfg_name = str(cfg.get("source_db_name") or cfg.get("database_name") or "").strip()
+        cfg_db = str(cfg.get("database_name") or "").strip()
+
+        norm_sys = re.sub(r'[^a-z0-9]', '', s_sys.lower())
+        norm_cfg_name = re.sub(r'[^a-z0-9]', '', cfg_name.lower())
+        norm_cfg_db = re.sub(r'[^a-z0-9]', '', cfg_db.lower())
+
+        if norm_sys and (norm_sys == norm_cfg_name or norm_sys == norm_cfg_db or norm_sys in norm_cfg_name or norm_cfg_name in norm_sys):
+            matches.append(cfg)
+        elif s_db and (s_db.lower() == cfg_name.lower() or s_db.lower() == cfg_db.lower()):
+            matches.append(cfg)
+
+    # If no specific match found, but only 1 source connection is configured and system is 'Default' or empty
+    if not matches and len(source_configs) == 1 and (not s_sys or s_sys.lower() in ("default", "custom source db")):
+        matches.append(source_configs[0])
+
+    if len(matches) == 1:
+        return matches[0], "RESOLVED", matches
+    elif len(matches) > 1:
+        # Check if all matches point to the exact same database host & name
+        first = matches[0]
+        all_same = all(
+            m.get("host") == first.get("host") and m.get("database_name") == first.get("database_name") and m.get("port") == first.get("port")
+            for m in matches
+        )
+        if all_same:
+            return first, "RESOLVED", matches
+        return None, "AMBIGUOUS", matches
+
+    return None, "NOT_CONFIGURED", []
+
+
+def verify_source_table_dynamic(
+    source_table: dict,
+    source_configs: list,
+    analysis_data: Optional[dict] = None
+) -> dict:
+    """
+    Executes the strict 8-Step Source Verification Flow (Requirement 9):
+    1. Resolve source connection
+    2. Missing connection -> CONNECTION_NOT_CONFIGURED, Table: NOT_CHECKED (do not query DB)
+    3. Test connection -> if failed -> CONNECTION_FAILED, Table: NOT_CHECKED
+    4. Connection OK -> CONNECTION_VERIFIED
+    5. Check schema -> if missing -> SCHEMA_NOT_FOUND, DDL: DDL_OMITTED
+    6. Check table -> if missing -> TABLE_NOT_FOUND, DDL: DDL_OMITTED
+    7. Table exists -> TABLE_FOUND, DDL: DDL_RETRIEVED, pull columns, PKs, rows
+    8. Column comparison -> required HLA columns vs actual live columns
+    """
+    s_table = str(source_table.get("table") or source_table.get("source_table_name") or source_table.get("table_name") or "").strip()
+    s_schema = str(source_table.get("schema") or source_table.get("source_schema") or "").strip()
+    s_sys = str(source_table.get("source_system") or source_table.get("database") or "Default").strip()
+    s_id = str(source_table.get("source_id") or "N/A").strip()
+    s_ref = str(source_table.get("connection_reference") or s_sys).strip()
+
+    if "." in s_table:
+        dot_parts = [p.strip().strip('"') for p in s_table.split(".") if p.strip()]
+        if len(dot_parts) >= 2:
+            if not s_schema:
+                s_schema = dot_parts[0]
+            s_table = dot_parts[-1]
+
+    eff_schema = s_schema or "public"
+    full_table_name = f"{eff_schema}.{s_table}" if eff_schema != "public" else s_table
+
+    matched_cfg, res_status, candidate_matches = resolve_source_connection_for_table(source_table, source_configs)
+
+    # Step 1 & 2: Connection Resolution
+    if res_status == "NOT_CONFIGURED":
+        conn_status = "CONNECTION_NOT_CONFIGURED"
+        table_status = "NOT_CHECKED"
+        ddl_status = "NOT_CHECKED"
+        msg = f"SOURCE CONNECTION NOT CONFIGURED:\nSource system '{s_sys}' (Source ID: {s_id}) has no configured database connection. Table inspection was not performed."
+        print(f"[SOURCE RESOLUTION] system='{s_sys}' database='{s_ref}' schema='{eff_schema}' table='{s_table}' -> status='{conn_status}'")
         return {
+            "source_id": s_id,
+            "source_system": s_sys,
+            "connection_reference": s_ref,
+            "database": s_ref,
+            "schema": eff_schema,
+            "source_schema": eff_schema,
+            "table": s_table,
+            "table_name": s_table,
+            "source_table_name": s_table,
+            "full_table_name": full_table_name,
+            "role": "PHYSICAL_SOURCE",
+            "origin": source_table.get("origin", {}),
+            "connection_status": conn_status,
+            "table_status": table_status,
+            "ddl_status": ddl_status,
+            "status": "connection_not_configured",
+            "status_display": "CONNECTION NOT CONFIGURED ⚠️",
+            "connection_error": None,
             "table_found": False,
-            "is_simulated": False,
-            "schema_name": schema_name or "public",
-            "table_name": table_name,
+            "schema_found": False,
+            "ddl_pulled": False,
             "columns": [],
-            "message": f"No source databases configured to search for table '{table_name}'."
+            "primary_keys": [],
+            "row_count": None,
+            "target_required_columns": [],
+            "target_required_columns_count": 0,
+            "source_columns_count": None,
+            "missing_columns": [],
+            "extra_columns": [],
+            "message": msg
+        }
+    elif res_status == "AMBIGUOUS":
+        conn_status = "AMBIGUOUS_SOURCE_CONNECTION"
+        table_status = "NOT_CHECKED"
+        ddl_status = "NOT_CHECKED"
+        cand_names = [c.get("source_db_name") or c.get("database_name") for c in candidate_matches]
+        msg = f"AMBIGUOUS SOURCE CONNECTION:\nMultiple connections match source system '{s_sys}': {cand_names}."
+        print(f"[SOURCE RESOLUTION] system='{s_sys}' database='{s_ref}' schema='{eff_schema}' table='{s_table}' -> status='{conn_status}'")
+        return {
+            "source_id": s_id,
+            "source_system": s_sys,
+            "connection_reference": s_ref,
+            "database": s_ref,
+            "schema": eff_schema,
+            "source_schema": eff_schema,
+            "table": s_table,
+            "table_name": s_table,
+            "source_table_name": s_table,
+            "full_table_name": full_table_name,
+            "role": "PHYSICAL_SOURCE",
+            "origin": source_table.get("origin", {}),
+            "connection_status": conn_status,
+            "table_status": table_status,
+            "ddl_status": ddl_status,
+            "status": "ambiguous",
+            "status_display": "AMBIGUOUS CONNECTION ⚠️",
+            "connection_error": None,
+            "table_found": False,
+            "schema_found": False,
+            "ddl_pulled": False,
+            "columns": [],
+            "primary_keys": [],
+            "row_count": None,
+            "target_required_columns": [],
+            "target_required_columns_count": 0,
+            "source_columns_count": None,
+            "missing_columns": [],
+            "extra_columns": [],
+            "candidate_connections": cand_names,
+            "message": msg
         }
 
-    scanned_dbs = []
-    for cfg in source_configs:
-        db_label = cfg.get("source_db_name") or cfg.get("database_name") or "source_db"
-        scanned_dbs.append(db_label)
-        meta = fetch_table_metadata(cfg, schema_name, table_name)
-        if meta.get("table_found"):
-            meta["found_in_db"] = db_label
-            meta["scanned_databases"] = scanned_dbs
-            return meta
+    # Step 3 & 4: Test Connection
+    cfg_name = matched_cfg.get("source_db_name") or matched_cfg.get("database_name") or "source_db"
+    try:
+        engine = DatabaseManager.get_engine(matched_cfg)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        conn_status = "CONNECTION_VERIFIED"
+    except Exception as c_err:
+        conn_status = "CONNECTION_FAILED"
+        table_status = "NOT_CHECKED"
+        ddl_status = "NOT_CHECKED"
+        msg = f"SOURCE CONNECTION FAILED:\nCould not connect to database '{cfg_name}' for source system '{s_sys}' ({str(c_err)})."
+        print(f"[SOURCE RESOLUTION] system='{s_sys}' database='{s_ref}' schema='{eff_schema}' table='{s_table}' -> connection='{cfg_name}' status='{conn_status}' error='{str(c_err)}'")
+        return {
+            "source_id": s_id,
+            "source_system": s_sys,
+            "connection_reference": s_ref,
+            "database": s_ref,
+            "resolved_database": cfg_name,
+            "schema": eff_schema,
+            "source_schema": eff_schema,
+            "table": s_table,
+            "table_name": s_table,
+            "source_table_name": s_table,
+            "full_table_name": full_table_name,
+            "role": "PHYSICAL_SOURCE",
+            "origin": source_table.get("origin", {}),
+            "connection_status": conn_status,
+            "table_status": table_status,
+            "ddl_status": ddl_status,
+            "status": "connection_failed",
+            "status_display": "CONNECTION FAILED ❌",
+            "connection_error": str(c_err),
+            "table_found": False,
+            "schema_found": False,
+            "ddl_pulled": False,
+            "columns": [],
+            "primary_keys": [],
+            "row_count": None,
+            "target_required_columns": [],
+            "target_required_columns_count": 0,
+            "source_columns_count": None,
+            "missing_columns": [],
+            "extra_columns": [],
+            "message": msg
+        }
+
+    print(f"[SOURCE RESOLUTION] system='{s_sys}' database='{s_ref}' schema='{eff_schema}' table='{s_table}' -> connection='{cfg_name}' status='{conn_status}'")
+
+    # Step 5, 6, 7: Fetch Metadata from Verified Connection
+    meta = fetch_table_metadata(matched_cfg, eff_schema, s_table)
+    is_table_found = bool(meta.get("table_found"))
+    is_schema_found = bool(meta.get("schema_found", is_table_found))
+
+    if not is_schema_found:
+        table_status = "SCHEMA_NOT_FOUND"
+        ddl_status = "DDL_OMITTED"
+        msg = f"SCHEMA NOT FOUND:\nSource ID: {s_id}\nSource: {s_sys}\nDatabase: {cfg_name}\nSchema: {eff_schema}\nTable: {s_table}"
+    elif not is_table_found:
+        table_status = "TABLE_NOT_FOUND"
+        ddl_status = "DDL_OMITTED"
+        msg = f"SOURCE TABLE NOT FOUND:\nSource ID: {s_id}\nSource: {s_sys}\nDatabase: {cfg_name}\nSchema: {eff_schema}\nTable: {s_table}"
+    else:
+        table_status = "TABLE_FOUND"
+        ddl_status = "DDL_RETRIEVED"
+        msg = f"Table '{s_table}' verified in schema '{eff_schema}' of database '{cfg_name}'."
+
+    print(f"[SOURCE VERIFICATION] schema='{eff_schema}' table='{s_table}' status='{table_status}' ddl='{ddl_status}'")
+
+    # Step 8: Compare Columns
+    raw_cols = meta.get("columns", [])
+    try:
+        from target_logic_builder import extract_table_required_columns
+        req_cols_tokens = extract_table_required_columns(s_table, s_sys, analysis_data or {}) if is_table_found else set()
+    except Exception:
+        req_cols_tokens = set()
+
+    matched_req_cols = []
+    extra_cols = []
+
+    for c in raw_cols:
+        c_name = c.get("column_name") or c.get("name")
+        cn = re.sub(r'[^a-z0-9]', '', str(c_name).lower())
+        if cn in req_cols_tokens or any(t == cn for t in req_cols_tokens) or (len(cn) >= 4 and any(t in cn or cn in t for t in req_cols_tokens if len(t) >= 4)):
+            matched_req_cols.append(c_name)
+        else:
+            extra_cols.append(c_name)
+
+    missing_cols = []
+    for req_tok in req_cols_tokens:
+        if req_tok not in [re.sub(r'[^a-z0-9]', '', str(c).lower()) for c in matched_req_cols]:
+            missing_cols.append(req_tok)
+
+    pk_set = set(meta.get("primary_keys", []))
+    cols_data = [
+        {
+            "name": c.get("column_name") or c.get("name"),
+            "column_name": c.get("column_name") or c.get("name"),
+            "data_type": c.get("data_type", "VARCHAR(255)"),
+            "nullable": c.get("is_nullable", "YES"),
+            "is_nullable": c.get("is_nullable", "YES"),
+            "is_pk": ((c.get("column_name") or c.get("name")) in pk_set),
+            "primary_key": ((c.get("column_name") or c.get("name")) in pk_set),
+            "source": "LIVE DB" if is_table_found else "N/A"
+        }
+        for c in raw_cols
+    ]
+
+    status_key = "table_found" if is_table_found else ("schema_not_found" if not is_schema_found else "table_not_found")
+    status_disp = "FOUND ✓" if is_table_found else ("SCHEMA NOT FOUND ⚠️" if not is_schema_found else "NOT FOUND ❌")
 
     return {
-        "table_found": False,
-        "schema_found": False,
-        "status": "table_not_found",
-        "is_simulated": False,
-        "schema_name": schema_name or "public",
-        "table_name": table_name,
-        "columns": [],
-        "sample_rows": [],
-        "row_count": 0,
-        "scanned_databases": scanned_dbs,
-        "ddl_pulled": False,
-        "message": f"Table '{table_name}' was NOT found in any given source database connection ({', '.join(scanned_dbs)})."
+        "source_id": s_id,
+        "source_system": s_sys,
+        "connection_reference": s_ref,
+        "database": s_ref,
+        "resolved_database": cfg_name,
+        "found_in_db": cfg_name,
+        "schema": eff_schema,
+        "source_schema": eff_schema,
+        "table": s_table,
+        "table_name": s_table,
+        "source_table_name": s_table,
+        "full_table_name": full_table_name,
+        "role": "PHYSICAL_SOURCE",
+        "origin": source_table.get("origin", {}),
+        "connection_status": conn_status,
+        "table_status": table_status,
+        "ddl_status": ddl_status,
+        "status": status_key,
+        "status_display": status_disp,
+        "connection_error": None,
+        "table_found": is_table_found,
+        "schema_found": is_schema_found,
+        "ddl_pulled": is_table_found,
+        "columns": cols_data,
+        "primary_keys": meta.get("primary_keys", []),
+        "row_count": meta.get("row_count"),
+        "target_required_columns": matched_req_cols,
+        "target_required_columns_count": len(matched_req_cols),
+        "source_columns_count": len(raw_cols) if is_table_found else None,
+        "missing_columns": missing_cols,
+        "extra_columns": extra_cols,
+        "message": msg
     }
+
+
+def find_table_across_databases(source_configs: list, schema_name: str, table_name: str, source_system: str = None, source_id: str = None) -> dict:
+    """
+    Backward-compatible wrapper delegating to verify_source_table_dynamic.
+    """
+    src_table = {
+        "schema": schema_name,
+        "table": table_name,
+        "source_system": source_system or "Default",
+        "source_id": source_id or "SRC001",
+        "database": source_system or "Default"
+    }
+    return verify_source_table_dynamic(src_table, source_configs)
 

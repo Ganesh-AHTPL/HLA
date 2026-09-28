@@ -93,7 +93,8 @@ export default function DocumentAnalysis({ documentId, projectId, onRefreshList,
   if (!doc) return null
 
   const analysis = doc.analysis || {}
-  const sources = analysis.sources || []
+  const sources = (analysis.classification?.source_tables) || analysis.sources || analysis.source_tables || []
+  const allTableObjects = analysis.all_table_objects || analysis.hla_data_model?.all_table_objects || sources
   const rules = analysis.rules || {}
   const inputStreams = rules.input_streams || []
   const filterRules = rules.filter_rules || []
@@ -110,7 +111,7 @@ export default function DocumentAnalysis({ documentId, projectId, onRefreshList,
   const filtrationSteps = rules.filtration_steps || []
   const configTables = analysis.config_tables || []
   const reportInventory = analysis.report_inventory || []
-  const dataModel = analysis.data_model || []
+  const dataModel = (analysis.classification?.target_tables) || analysis.data_model || analysis.data_models || []
   const buckets = analysis.buckets || []
   const derivedFields = analysis.derived_fields || []
 
@@ -330,7 +331,7 @@ export default function DocumentAnalysis({ documentId, projectId, onRefreshList,
               onClick={() => setActiveTab('sources')}
               id="tab-btn-sources"
             >
-              <span>📊</span> Source Systems & Tables ({sources.length})
+              <span>📊</span> Source Architecture ({allTableObjects.length || sources.length})
             </button>
             <button
               className={`studio-tab-btn ${activeTab === 'rules' ? 'active' : ''}`}
@@ -380,14 +381,14 @@ export default function DocumentAnalysis({ documentId, projectId, onRefreshList,
             </button>
           </div>
 
-          {/* ── TAB 1: Source Systems & Tables ── */}
+          {/* ── TAB 1: Source Architecture ── */}
           {activeTab === 'sources' && (
             <div className="tab-card-panel">
               <div className="panel-header-strip">
                 <div>
-                  <h4 style={{ margin: '0 0 0.2rem 0', color: '#ffffff' }}>Configured Upstream Source Tables</h4>
+                  <h4 style={{ margin: '0 0 0.2rem 0', color: '#ffffff' }}>Normalized Source & Data Model Architecture</h4>
                   <p style={{ margin: 0, fontSize: '0.82rem', color: '#94a3b8' }}>
-                    Extracted from the HLA document. Click "Live Introspect" on any table to examine actual column data types and live sample rows.
+                    Document-driven architecture layers: Physical upstream sources (verified via SOURCE DB connection) and target-side data model objects.
                   </p>
                 </div>
                 <button
@@ -399,51 +400,115 @@ export default function DocumentAnalysis({ documentId, projectId, onRefreshList,
                 </button>
               </div>
 
+              {/* Dynamic Layer Counters */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '8px', margin: '12px 0' }}>
+                <div style={{ background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: '6px', padding: '8px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>Physical Sources</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#38bdf8' }}>
+                    {summaryCounts.physical_sources_count ?? sources.length}
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: '#64748b' }}>Role: SOURCE</div>
+                </div>
+                <div style={{ background: 'rgba(168, 85, 247, 0.08)', border: '1px solid rgba(168, 85, 247, 0.25)', borderRadius: '6px', padding: '8px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>Source Staging</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#a855f7' }}>
+                    {summaryCounts.source_staging_count ?? dataModel.filter(d => ['SOURCE_STAGING', 'INGESTION', 'STAGING'].includes(d.role) || (d.stage || '').toLowerCase().includes('acquis') || (d.stage || '').toLowerCase().includes('ingest')).length}
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: '#64748b' }}>Role: TARGET</div>
+                </div>
+                <div style={{ background: 'rgba(234, 179, 8, 0.08)', border: '1px solid rgba(234, 179, 8, 0.25)', borderRadius: '6px', padding: '8px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>Processing</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#eab308' }}>
+                    {(summaryCounts.processing_count || 0) + (summaryCounts.pre_execution_count || 0) || dataModel.filter(d => ['PRE_EXECUTION', 'PROCESSING', 'EXECUTION'].includes(d.role)).length}
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: '#64748b' }}>Role: TARGET</div>
+                </div>
+                <div style={{ background: 'rgba(249, 115, 22, 0.08)', border: '1px solid rgba(249, 115, 22, 0.25)', borderRadius: '6px', padding: '8px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>Post-Exec / KRI</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#f97316' }}>
+                    {(summaryCounts.post_execution_count || 0) + (summaryCounts.kri_count || 0) || dataModel.filter(d => ['POST_EXECUTION', 'KRI', 'SUMMARY', 'RECONCILIATION'].includes(d.role)).length}
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: '#64748b' }}>Role: TARGET</div>
+                </div>
+                <div style={{ background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)', borderRadius: '6px', padding: '8px 12px' }}>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', textTransform: 'uppercase', fontWeight: 600 }}>Reporting / Output</div>
+                  <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#22c55e' }}>
+                    {summaryCounts.reporting_count ?? dataModel.filter(d => ['REPORTING', 'WORK_ITEM', 'CURATED', 'OUTPUT', 'EXCEPTION'].includes(d.role)).length}
+                  </div>
+                  <div style={{ fontSize: '0.68rem', color: '#64748b' }}>Role: TARGET</div>
+                </div>
+              </div>
+
               <div className="table-responsive-wrapper">
                 <table className="analysis-table" id="sources-table">
                   <thead>
                     <tr>
-                      <th>Source DB</th>
+                      <th>Role / Connection</th>
+                      <th>Stage / Layer</th>
+                      <th>Database / System</th>
                       <th>Schema</th>
                       <th>Physical Table Name</th>
-                      <th>Frequency</th>
-                      <th>Schedule / Window</th>
+                      <th>Lineage (Upstream → Downstream)</th>
                       <th>Type of Load</th>
                       <th>Live Inspection</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {sources.map((src, idx) => {
-                      const tableKey = `${src.source_schema}.${src.source_table}`
+                    {(allTableObjects.length > 0 ? allTableObjects : sources).map((src, idx) => {
+                      const isPhysical = (src.role === 'PHYSICAL_SOURCE') || (!src.role && src.source_db)
+                      const connRole = src.connection_role || src.connectionRole || (isPhysical ? 'SOURCE' : 'TARGET')
+                      const tableKey = `${src.schema || src.source_schema || 'public'}.${src.table || src.source_table || src.entity_name}`
                       const isFetching = fetchingSchemaTable === tableKey
+                      const dbDisplay = src.database || src.source_db || (isPhysical ? 'Source DB' : 'Target DB')
+                      const loadType = src.load_type || src.loadType || src.type_of_load || 'Truncate and load'
+                      const isAppend = String(loadType).toLowerCase().includes('append')
+
                       return (
                         <tr key={idx}>
                           <td>
-                            <span className="badge-db-source">{src.source_db || 'Source DB'}</span>
+                            <span className="badge" style={{
+                              background: isPhysical ? 'rgba(56, 189, 248, 0.15)' : 'rgba(168, 85, 247, 0.15)',
+                              color: isPhysical ? '#38bdf8' : '#c084fc',
+                              fontWeight: 700,
+                              fontSize: '0.72rem'
+                            }}>
+                              {src.role || (isPhysical ? 'PHYSICAL_SOURCE' : 'DATA_MODEL')} ({connRole})
+                            </span>
+                          </td>
+                          <td style={{ color: '#cbd5e1', fontSize: '0.8rem', fontWeight: 600 }}>
+                            {src.stage || (isPhysical ? 'Physical Upstream' : 'Target Model')}
+                          </td>
+                          <td>
+                            <span className="badge-db-source">{dbDisplay}</span>
                           </td>
                           <td style={{ color: '#94a3b8', fontFamily: 'JetBrains Mono', fontSize: '0.78rem' }}>
-                            {src.source_schema || 'public'}
+                            {src.schema || src.source_schema || 'public'}
                           </td>
                           <td className="table-code-cell">
-                            <code>{src.source_table || src.full_table_name}</code>
+                            <code>{src.table || src.source_table || src.entity_name || src.full_table_name}</code>
                           </td>
-                          <td>{src.frequency || 'Daily'}</td>
-                          <td style={{ color: '#94a3b8', fontSize: '0.8rem' }}>{src.refresh_time || 'Daily 6:00 AM'}</td>
+                          <td style={{ fontSize: '0.76rem', color: '#94a3b8', fontFamily: 'JetBrains Mono' }}>
+                            {src.upstream ? `← ${src.upstream}` : ''} {src.upstream && src.downstream ? '·' : ''} {src.downstream ? `→ ${src.downstream}` : (!src.upstream ? '—' : '')}
+                          </td>
                           <td>
-                            <span className={`load-badge ${src.type_of_load === 'Append' ? 'append' : 'truncate'}`}>
-                              {src.type_of_load || 'Truncate and load'}
+                            <span className={`load-badge ${isAppend ? 'append' : 'truncate'}`}>
+                              {loadType}
                             </span>
                           </td>
                           <td>
-                            <button
-                              className="btn-fetch-schema"
-                              onClick={() => handleFetchTableSchema(src)}
-                              disabled={isFetching}
-                              title="Fetch actual columns, types, and sample data from source DB"
-                            >
-                              <span>⚡</span>
-                              <span>{isFetching ? 'Introspecting…' : 'Live Introspect'}</span>
-                            </button>
+                            {isPhysical ? (
+                              <button
+                                className="btn-fetch-schema"
+                                onClick={() => handleFetchTableSchema(src)}
+                                disabled={isFetching}
+                                title="Fetch actual columns, types, and sample data from source DB"
+                              >
+                                <span>⚡</span>
+                                <span>{isFetching ? 'Introspecting…' : 'Live Introspect'}</span>
+                              </button>
+                            ) : (
+                              <span style={{ fontSize: '0.74rem', color: '#64748b' }}>Target Object</span>
+                            )}
                           </td>
                         </tr>
                       )

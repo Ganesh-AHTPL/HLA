@@ -63,13 +63,23 @@ class SQLGenerator:
         all_target_cols = header_cols + biz_cols + footer_cols
         all_select_vals = header_vals + biz_vals + footer_vals
 
+        # Defensively clean source_schema and source_table
+        s_schema = source_schema.strip().strip('"') if source_schema else "public"
+        s_table = source_table.strip().strip('"')
+        if "." in s_table:
+            parts = [p.strip().strip('"') for p in s_table.split(".")]
+            if len(parts) == 2:
+                s_schema, s_table = parts[0], parts[1]
+            elif len(parts) == 3:
+                s_schema, s_table = parts[1], parts[2]
+
         sql = f"""
 INSERT INTO "{target_schema}"."{target_table}" (
     {", ".join(all_target_cols)}
 )
 SELECT
     {", ".join(all_select_vals)}
-FROM "{source_schema}"."{source_table}" s;
+FROM "{s_schema}"."{s_table}" s;
 """.strip()
 
         return target_table, sql

@@ -55,7 +55,7 @@ export default function FileUpload({ onUploadSuccess, projectId, currentUser }) 
   const handleFile = useCallback((selectedFile) => {
     if (!selectedFile) return
     if (!isValidFile(selectedFile)) {
-      setErrorMsg(`Unsupported file format. Only Excel files (.xlsx, .xls) conforming to the HLA Control Specification template are accepted. Word (.docx, .doc), PDF, CSV, and other formats are strictly not permitted.`)
+      setErrorMsg(`Unsupported file format. Only Excel workbooks (.xlsx, .xls) are accepted. Word, PDF, CSV, and other formats are not supported.`)
       setStatus(STATUS.ERROR)
       return
     }
@@ -167,16 +167,17 @@ export default function FileUpload({ onUploadSuccess, projectId, currentUser }) 
             <div className="dropzone-icon-orb">
               <span style={{ fontSize: '2rem' }}>📊</span>
             </div>
-            <h3>Drop your HLA Control Specification (.xlsx) Here</h3>
+            <h3>Drop your Architecture or Specification Document (.xlsx) Here</h3>
             <p className="dropzone-hint">
-              Drag & drop your standard Excel specification (.xlsx, .xls), or <span className="browse-link">browse files</span>
+              Drag & drop your Excel workbook (.xlsx, .xls), or <span className="browse-link">browse files</span>
             </p>
             <div className="supported-formats-pills">
-              <span className="fmt-pill xlsx" style={{ borderColor: 'rgba(16, 185, 129, 0.4)', color: '#34d399', background: 'rgba(16, 185, 129, 0.12)' }}>★ .XLSX / .XLS Only (Shared HLA Format)</span>
+              <span className="fmt-pill xlsx" style={{ borderColor: 'rgba(16, 185, 129, 0.4)', color: '#34d399', background: 'rgba(16, 185, 129, 0.12)' }}>★ .XLSX / .XLS Workbooks</span>
               <span className="fmt-pill max">Max 50 MB</span>
             </div>
           </div>
         )}
+
 
         {/* State 2: File Selected & Ready */}
         {status === STATUS.READY && file && (

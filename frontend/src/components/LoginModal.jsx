@@ -383,7 +383,7 @@ export default function LoginModal({ isOpen, onLoginSuccess, onClose, currentRol
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
-  
+
   // Interactive Language State
   const [currentLang, setCurrentLang] = useState(() => {
     return localStorage.getItem('hla_lang') || 'en_GB'
@@ -581,10 +581,12 @@ export default function LoginModal({ isOpen, onLoginSuccess, onClose, currentRol
     } catch (err) {
       if (!err.response) {
         setErrorMsg('Cannot connect to backend server. Ensure Flask backend is running on port 5000.')
+      } else if (err.response.data?.error) {
+        setErrorMsg(err.response.data.error)
       } else if (err.response.status === 500) {
-        setErrorMsg('Database connection error on server. Verify PostgreSQL credentials in .env.')
+        setErrorMsg('Backend server error or proxy connection refused. Ensure Flask backend is running on port 5000.')
       } else {
-        setErrorMsg(err.response.data?.error || 'The username or password you entered is incorrect.')
+        setErrorMsg('The username or password you entered is incorrect.')
       }
     } finally {
       setLoading(false)
@@ -595,7 +597,7 @@ export default function LoginModal({ isOpen, onLoginSuccess, onClose, currentRol
     <div className="fb-login-viewport" dir={isRTL ? 'rtl' : 'ltr'}>
       <div className="fb-content-wrapper">
         <div className="fb-login-container">
-          
+
           {/* ── Left Side: Facebook-Style Brand Hero ── */}
           <div className="fb-hero-section">
             <div className="fb-brand-title">
